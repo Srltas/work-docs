@@ -159,15 +159,15 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 
 ### 표 5. DBMD — `getTypeInfo()` 카탈로그
 
-드라이버가 "지원한다"고 광고하는 타입 목록. per-column 조회가 아니라 정적 카탈로그이며, 위 표들과 여러 곳에서 어긋난다. (병렬 배열 `column1`=TYPE_NAME / `column2`=DATA_TYPE)
+**성격**: per-column 조회가 아니라 **역방향 카탈로그** — DATA_TYPE(`java.sql.Types`)을 키로, "그 JDBC 타입을 만들 때 쓸 CUBRID 네이티브 타입 이름(TYPE_NAME)"을 안내한다. JDBC 규약상 DATA_TYPE 순 + "JDBC 타입에 근접한 순"으로 정렬되어 최적 네이티브가 맨 앞에 와야 한다. 하나의 네이티브 타입이 여러 JDBC 타입을 담당하는 게 정상(예: DOUBLE→FLOAT·DOUBLE, VARCHAR→VARCHAR·LONGVARCHAR).
 
-> ⚠️ **getTypeInfo는 `sortTuples`를 호출하지 않는다** (다른 메타데이터 메서드는 모두 정렬). 배열 순서 그대로 반환하므로 JDBC 규약의 "DATA_TYPE 순 정렬"을 위반하며, 아래 중복 DATA_TYPE 행에서 잘못된 행이 먼저 매치될 수 있다.
+> ❌ **핵심 결함 — getTypeInfo는 `sortTuples`를 호출하지 않는다** (다른 메타데이터 메서드는 모두 정렬). 배열 순서 그대로 반환하므로 JDBC 규약의 "DATA_TYPE 순 + 근접순" 정렬을 위반한다. 그 결과 같은 DATA_TYPE에 후보가 둘일 때 **덜 적합한 후보가 먼저 매치**될 수 있다(아래 BIGINT).
 
 | # | TYPE_NAME | `java.sql.Types` (DATA_TYPE) | 비고 |
 |---|---|---|---|
 | 1 | BIT | `BIT` | |
-| 2 | NUMERIC | `TINYINT` | ❌ CUBRID에 TINYINT 타입 없음. 삭제하거나, 남긴다면 가장 가까운 `SMALLINT`로. NUMERIC은 부적절 |
-| 3 | NUMERIC | `BIGINT` | ❌ 레거시 오매핑. 정답 `BIGINT→BIGINT`(11번)가 이미 있음 → **삭제 대상**. 미정렬이라 이 행이 먼저 매치되면 BIGINT 컬럼을 NUMERIC으로 생성할 위험 |
+| 2 | NUMERIC | `TINYINT` | △ "JDBC TINYINT엔 NUMERIC(3) 써라"는 역방향 안내 — CUBRID에 TINYINT가 없어 대체 제공(행 자체는 오류 아님). 다만 더 가까운 네이티브는 `SMALLINT` |
+| 3 | NUMERIC | `BIGINT` | △ BIGINT용 레거시 대체(네이티브 BIGINT 이전 잔재). 네이티브 `BIGINT`(11번)가 더 근접 → 정렬됐다면 그게 먼저 와야 함. **미정렬이라** NUMERIC이 먼저 매치돼 BIGINT를 NUMERIC으로 생성할 위험 |
 | 4 | BIT VARYING | `LONGVARBINARY` | |
 | 5 | BIT VARYING | `VARBINARY` | |
 | 6 | BIT | `BINARY` | |
@@ -225,7 +225,7 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 2. **BIT** — 5개 지점이 전부 다르게 처리(BIT/BINARY/Boolean/byte[]/null). 특히 getBestRowIdentifier는 case 자체가 없음.
 3. **NULL** — RSMD①만 `OTHER`, 나머지는 `NULL` 또는 미처리.
 4. **부호 없는 정수** — 어느 지점에도 case 없음(도달성 확인 필요).
-5. **getTypeInfo 카탈로그** — 미정렬(`sortTuples` 없음 → JDBC "DATA_TYPE 순" 위반) + 오매핑 행: `NUMERIC→TINYINT`(CUBRID에 없는 타입), `NUMERIC→BIGINT`(레거시 중복, 삭제 대상; 미정렬로 BIGINT를 NUMERIC으로 생성할 위험). `DOUBLE→FLOAT`은 정상.
+5. **getTypeInfo 카탈로그** — `java.sql.Types` → CUBRID 네이티브 타입 역방향 안내표. 실제 결함은 **미정렬**(`sortTuples` 없음 → JDBC "DATA_TYPE 순 + 근접순" 위반)로, BIGINT에서 레거시 `NUMERIC`이 네이티브 `BIGINT`보다 먼저 매치될 수 있음. `NUMERIC→TINYINT`는 오류가 아니라 대체 안내(단 `SMALLINT`가 더 적절), `DOUBLE→FLOAT`은 정상.
 
 `NCHAR`/`NCHAR VARYING`·`MONETARY` 매핑은 데드 경로(엔진에서 제거된 타입; 단 MONETARY는 11.4 매뉴얼 문구가 아직 "제거될 예정")이며, TIMETZ는 CUBRID 타입이 아니어서 드라이버도 `/* unused */`로 일관된다.
 
