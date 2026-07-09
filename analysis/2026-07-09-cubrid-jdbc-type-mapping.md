@@ -161,11 +161,13 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 
 드라이버가 "지원한다"고 광고하는 타입 목록. per-column 조회가 아니라 정적 카탈로그이며, 위 표들과 여러 곳에서 어긋난다. (병렬 배열 `column1`=TYPE_NAME / `column2`=DATA_TYPE)
 
+> ⚠️ **getTypeInfo는 `sortTuples`를 호출하지 않는다** (다른 메타데이터 메서드는 모두 정렬). 배열 순서 그대로 반환하므로 JDBC 규약의 "DATA_TYPE 순 정렬"을 위반하며, 아래 중복 DATA_TYPE 행에서 잘못된 행이 먼저 매치될 수 있다.
+
 | # | TYPE_NAME | `java.sql.Types` (DATA_TYPE) | 비고 |
 |---|---|---|---|
 | 1 | BIT | `BIT` | |
-| 2 | NUMERIC | `TINYINT` | ⚠️ CUBRID에 TINYINT 없음 — NUMERIC 이름을 정수 타입에 부여한 비표준 행 |
-| 3 | NUMERIC | `BIGINT` | 11번(BIGINT→BIGINT)과 중복 — NUMERIC 이름으로도 BIGINT를 광고 |
+| 2 | NUMERIC | `TINYINT` | ❌ CUBRID에 TINYINT 타입 없음. 삭제하거나, 남긴다면 가장 가까운 `SMALLINT`로. NUMERIC은 부적절 |
+| 3 | NUMERIC | `BIGINT` | ❌ 레거시 오매핑. 정답 `BIGINT→BIGINT`(11번)가 이미 있음 → **삭제 대상**. 미정렬이라 이 행이 먼저 매치되면 BIGINT 컬럼을 NUMERIC으로 생성할 위험 |
 | 4 | BIT VARYING | `LONGVARBINARY` | |
 | 5 | BIT VARYING | `VARBINARY` | |
 | 6 | BIT | `BINARY` | |
@@ -175,7 +177,7 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 | 10 | INTEGER | `INTEGER` | |
 | 11 | BIGINT | `BIGINT` | |
 | 12 | SMALLINT | `SMALLINT` | |
-| 13 | DOUBLE | `FLOAT` | 15번(DOUBLE→DOUBLE)과 중복 행. `Types.FLOAT`은 JDBC상 배정밀도라 의미는 무방 |
+| 13 | DOUBLE | `FLOAT` | ✅ 정상. `Types.FLOAT`은 JDBC상 배정밀도(=`Types.DOUBLE`)이므로 CUBRID `DOUBLE`로 매핑하는 것이 옳음. 15번과 이름은 같지만 DATA_TYPE이 달라 충돌 아님 |
 | 14 | FLOAT | `REAL` | |
 | 15 | DOUBLE | `DOUBLE` | |
 | 16 | VARCHAR | `VARCHAR` | |
@@ -211,7 +213,7 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 ### 관찰 — 정상인데 오해하기 쉬운 것
 
 - **FLOAT → `REAL`은 정상.** JDBC 규약상 `REAL`=단정밀도(→Java `float`), `FLOAT`=배정밀도(→`double`). CUBRID FLOAT/REAL은 4바이트 단정밀도이므로 `Types.REAL`이 맞다. `Types.FLOAT`으로 바꾸면 오히려 틀린다.
-- **`Types.FLOAT` ≡ `Types.DOUBLE`(둘 다 배정밀도).** getTypeInfo의 "DOUBLE→`Types.FLOAT`"(표 5의 13번)은 이름-타입 불일치가 아니라 단순 중복이다.
+- **`Types.FLOAT` ≡ `Types.DOUBLE`(둘 다 배정밀도).** getTypeInfo의 "DOUBLE→`Types.FLOAT`"(표 5의 13번)은 오류가 아니라 **정상**이다 — JDBC의 두 배정밀도 상수(FLOAT·DOUBLE)를 CUBRID `DOUBLE` 하나로 커버하는 것. `Types.REAL`(단정밀도)만 CUBRID `FLOAT`에 대응.
 - **ENUM / JSON → `VARCHAR`** — 표준 매핑이 없는 타입이라 방어 가능한 선택.
 - **역방향(`setObject`)에는 `Types → U_TYPE` 스위치가 없다.** 값의 런타임 Java 클래스로 `U_TYPE`을 정한다(`UUType.getObjectDBtype`). `targetSqlType`은 NUMERIC/DECIMAL 스케일 조정 외엔 무시.
 
@@ -223,7 +225,7 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 2. **BIT** — 5개 지점이 전부 다르게 처리(BIT/BINARY/Boolean/byte[]/null). 특히 getBestRowIdentifier는 case 자체가 없음.
 3. **NULL** — RSMD①만 `OTHER`, 나머지는 `NULL` 또는 미처리.
 4. **부호 없는 정수** — 어느 지점에도 case 없음(도달성 확인 필요).
-5. **getTypeInfo 카탈로그** — 이상·중복 행(NUMERIC↔TINYINT 등).
+5. **getTypeInfo 카탈로그** — 미정렬(`sortTuples` 없음 → JDBC "DATA_TYPE 순" 위반) + 오매핑 행: `NUMERIC→TINYINT`(CUBRID에 없는 타입), `NUMERIC→BIGINT`(레거시 중복, 삭제 대상; 미정렬로 BIGINT를 NUMERIC으로 생성할 위험). `DOUBLE→FLOAT`은 정상.
 
 `NCHAR`/`NCHAR VARYING`·`MONETARY` 매핑은 데드 경로(엔진에서 제거된 타입; 단 MONETARY는 11.4 매뉴얼 문구가 아직 "제거될 예정")이며, TIMETZ는 CUBRID 타입이 아니어서 드라이버도 `/* unused */`로 일관된다.
 
