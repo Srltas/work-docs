@@ -21,82 +21,162 @@ JDBC 메타데이터 검증 과정에서 타입 매핑이 부정확해 보인다
 ## 범위 / 방법
 
 - **CUBRID 타입 정의**: 11.4 매뉴얼 데이터 타입 페이지에서 숫자/문자/비트/날짜·시간/컬렉션/LOB/ENUM/JSON/OID 전수 확보. deprecation·삭제 상태(NCHAR, MONETARY, TIMETZ 존재 여부)도 원문으로 재확인.
-- **드라이버 매핑**: 소스 직접 확인.
+- **드라이버 매핑**: 소스 직접 확인. 아래 line 번호는 확인 시점 기준(버전에 따라 이동 가능).
   - 내부 타입 상수: `cubrid/jdbc/jci/UUType.java` (`U_TYPE_*`, 0~34)
   - RSMD: `cubrid/jdbc/driver/CUBRIDResultSetMetaData.java` 생성자 `switch`
   - DBMD getColumns: `cubrid/jdbc/driver/CUBRIDDatabaseMetaData.java` if/else 체인
   - DBMD getTypeInfo: 같은 파일의 병렬 배열 카탈로그
   - 클래스명: `cubrid/jdbc/jci/UColumnInfo.java` `findFQDN`
 - **제외**: `NCHAR`, `NCHAR VARYING` — 매뉴얼상 9.0에서 엔진 제거("9.0 버전부터 더 이상 지원하지 않으며, 대신 CHAR, VARCHAR 타입을 사용"). 드라이버 코드에는 매핑이 잔존하나 서버가 방출하지 않는 데드 경로.
+- **판정 범례**: ✅ 적절 · ⚠️ 검토 필요 · 그 외 비고 참조.
 
 ## 발견 / 관찰
 
-### 매핑표 (RSMD `getColumnType` 기준, NCHAR 제외)
+### 표 A. RSMD 기준 — `ResultSetMetaData.getColumnType()`
 
-| CUBRID 타입 (별칭) | `U_TYPE` | `java.sql.Types` | 판정 |
+앱이 결과셋 컬럼 타입을 조회할 때 실제로 받는 값. (`CUBRIDResultSetMetaData.java`)
+
+| # | CUBRID 타입 (별칭) | `U_TYPE` (값) | `java.sql.Types` | line | 판정 |
+|---|---|---|---|---|---|
+| 1 | SHORT / SMALLINT | SHORT(9) | `SMALLINT` | :151 | ✅ |
+| 2 | INTEGER / INT | INT(8) | `INTEGER` | :160 | ✅ |
+| 3 | BIGINT | BIGINT(21) | `BIGINT` | :171 | ✅ |
+| 4 | NUMERIC / DECIMAL / DEC | NUMERIC(7) | `NUMERIC` *(mysql 모드 `DECIMAL`)* | :189 | ✅ |
+| 5 | FLOAT / REAL | FLOAT(11) | `REAL` | :177 | ✅ *(규약상 정상, 비고)* |
+| 6 | DOUBLE / DOUBLE PRECISION | DOUBLE(12) | `DOUBLE` | :183 | ✅ |
+| 7 | MONETARY | MONETARY(10) | `DOUBLE` | :203 | ⚠️ deprecated·고정소수 의미 손실 |
+| 8 | CHAR / CHARACTER | CHAR(1) | `CHAR` | :100 | ✅ |
+| 9 | VARCHAR / CHAR VARYING / STRING | VARCHAR(2) | `VARCHAR` | :109 | ✅ |
+| 10 | BIT | BIT(5) | prec==8 → `BIT`, 그 외 → `BINARY` | :127 | ⚠️ BIT(8)을 Boolean 취급 |
+| 11 | BIT VARYING | VARBIT(6) | `VARBINARY` | :142 | ✅ |
+| 12 | DATE | DATE(13) | `DATE` | :209 | ✅ |
+| 13 | TIME | TIME(14) | `TIME` | :215 | ✅ |
+| 14 | TIMESTAMP | TIMESTAMP(15) | `TIMESTAMP` | :221 | ✅ |
+| 15 | DATETIME | DATETIME(22) | `TIMESTAMP` | :239 | ✅ |
+| 16 | TIMESTAMPTZ / TIMESTAMP WITH TIME ZONE | TIMESTAMPTZ(29) | `TIMESTAMP` | :227 | ⚠️ TZ 손실 |
+| 17 | TIMESTAMPLTZ | TIMESTAMPLTZ(30) | `TIMESTAMP` | :233 | ⚠️ |
+| 18 | DATETIMETZ / DATETIME WITH TIME ZONE | DATETIMETZ(31) | `TIMESTAMP` | :245 | ⚠️ |
+| 19 | DATETIMELTZ | DATETIMELTZ(32) | `TIMESTAMP` | :251 | ⚠️ |
+| 20 | SET | SET(16) | `OTHER` | :270 | ⚠️ getTypeInfo는 `ARRAY` |
+| 21 | MULTISET | MULTISET(17) | `OTHER` | :273 | ⚠️ |
+| 22 | LIST / SEQUENCE | SEQUENCE(18) | `OTHER` | :278 | ⚠️ |
+| 23 | BLOB | BLOB(23) | `BLOB` | :426 | ✅ |
+| 24 | CLOB | CLOB(24) | `CLOB` | :432 | ✅ |
+| 25 | ENUM | ENUM(25) | `VARCHAR` | :118 | ✅ *(표준 부재)* |
+| 26 | JSON | JSON(34) | `VARCHAR` | :438 | ⚠️ 표준 부재(`OTHER`도 가능) |
+| 27 | object / OID | OBJECT(19) | `OTHER` | :264 | ✅ |
+| 28 | (NULL 타입 컬럼) | NULL(0) | `OTHER` | :257 | ⚠️ `Types.NULL` 주석 처리됨 |
+
+`switch`에 case 없음 → `default`(line 447) → `Types.NULL(0)` 반환: 부호 없는 정수 `USHORT(26)`/`UINT(27)`/`UBIGINT(28)`, `RESULTSET(20)`.
+
+### 표 B. DBMD 기준 ① — `DatabaseMetaData.getColumns()` 의 `DATA_TYPE`
+
+카탈로그로 컬럼 목록을 조회할 때의 타입. (`CUBRIDDatabaseMetaData.java`, `value[4]`)
+
+| # | CUBRID 타입 (별칭) | `U_TYPE` (값) | `java.sql.Types` | line | 판정 |
+|---|---|---|---|---|---|
+| 1 | SHORT / SMALLINT | SHORT(9) | `SMALLINT` | :1181 | ✅ |
+| 2 | INTEGER / INT | INT(8) | `INTEGER` | :1187 | ✅ |
+| 3 | BIGINT | BIGINT(21) | `BIGINT` | :1184 | ✅ |
+| 4 | NUMERIC / DECIMAL / DEC | NUMERIC(7) | `NUMERIC` *(mysql 분기 없음)* | :1190 | ✅ |
+| 5 | FLOAT / REAL | FLOAT(11) | `REAL` | :1193 | ✅ |
+| 6 | DOUBLE / DOUBLE PRECISION | DOUBLE(12) | `DOUBLE` | :1196 | ✅ |
+| 7 | MONETARY | MONETARY(10) | `DOUBLE` | :1199 | ⚠️ deprecated |
+| 8 | CHAR / CHARACTER | CHAR(1) | `CHAR` | :1166 | ✅ |
+| 9 | VARCHAR / CHAR VARYING / STRING | VARCHAR(2) | `VARCHAR` | :1169 | ✅ |
+| 10 | BIT | BIT(5) | **항상 `BINARY`** (정밀도 무관) | :1160 | ⚠️ **RSMD와 불일치** |
+| 11 | BIT VARYING | VARBIT(6) | `VARBINARY` | :1163 | ✅ |
+| 12 | DATE | DATE(13) | `DATE` | :1205 | ✅ |
+| 13 | TIME | TIME(14) | `TIME` | :1202 | ✅ |
+| 14 | TIMESTAMP | TIMESTAMP(15) | `TIMESTAMP` | :1208 | ✅ |
+| 15 | DATETIME | DATETIME(22) | `TIMESTAMP` | :1211 | ✅ |
+| 16 | TIMESTAMPTZ | TIMESTAMPTZ(29) | `TIMESTAMP` | :1232 | ⚠️ TZ 손실 |
+| 17 | TIMESTAMPLTZ | TIMESTAMPLTZ(30) | `TIMESTAMP` | :1235 | ⚠️ |
+| 18 | DATETIMETZ | DATETIMETZ(31) | `TIMESTAMP` | :1238 | ⚠️ |
+| 19 | DATETIMELTZ | DATETIMELTZ(32) | `TIMESTAMP` | :1241 | ⚠️ |
+| 20 | SET | SET(16) | `OTHER` | :1217 | ⚠️ getTypeInfo는 `ARRAY` |
+| 21 | MULTISET | MULTISET(17) | `OTHER` | :1220 | ⚠️ |
+| 22 | LIST / SEQUENCE | SEQUENCE(18) | `OTHER` | :1223 | ⚠️ |
+| 23 | BLOB | BLOB(23) | `BLOB` | :1226 | ✅ |
+| 24 | CLOB | CLOB(24) | `CLOB` | :1229 | ✅ |
+| 25 | ENUM | ENUM(25) | `VARCHAR` | :1172 | ✅ |
+| 26 | JSON | JSON(34) | `VARCHAR` | :1244 | ⚠️ |
+| 27 | object / OID | OBJECT(19) | `OTHER` | :1214 | ✅ |
+| 28 | (NULL 타입 컬럼) | NULL(0) | **처리 없음** (`DATA_TYPE` 미설정) | — | ⚠️ **RSMD와 불일치** |
+
+if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`/`UBIGINT`, `RESULTSET(20)`. 미매칭 시 `value[4]`가 null인 채 반환.
+
+### 표 C. DBMD 기준 ② — `DatabaseMetaData.getTypeInfo()` 카탈로그
+
+드라이버가 "지원한다"고 광고하는 타입 목록. per-column 조회가 아니라 정적 카탈로그이며, 위 두 표와 여러 곳에서 어긋난다. (`CUBRIDDatabaseMetaData.java`, 병렬 배열 `column1`=TYPE_NAME / `column2`=DATA_TYPE)
+
+| # | TYPE_NAME | `java.sql.Types` (DATA_TYPE) | 비고 |
 |---|---|---|---|
-| SHORT / SMALLINT | SHORT(9) | `SMALLINT` | ✅ |
-| INTEGER / INT | INT(8) | `INTEGER` | ✅ |
-| BIGINT | BIGINT(21) | `BIGINT` | ✅ |
-| NUMERIC / DECIMAL / DEC | NUMERIC(7) | `NUMERIC` *(mysql 모드 `DECIMAL`)* | ✅ |
-| FLOAT / REAL | FLOAT(11) | `REAL` | ✅ *(규약상 정상)* |
-| DOUBLE / DOUBLE PRECISION | DOUBLE(12) | `DOUBLE` | ✅ |
-| MONETARY | MONETARY(10) | `DOUBLE` | ⚠️ deprecated |
-| CHAR / CHARACTER | CHAR(1) | `CHAR` | ✅ |
-| VARCHAR / CHAR VARYING / STRING | VARCHAR(2) | `VARCHAR` | ✅ |
-| BIT | BIT(5) | prec==8 → `BIT`, 그 외 → `BINARY` | ⚠️ |
-| BIT VARYING | VARBIT(6) | `VARBINARY` | ✅ |
-| DATE | DATE(13) | `DATE` | ✅ |
-| TIME | TIME(14) | `TIME` | ✅ |
-| TIMESTAMP | TIMESTAMP(15) | `TIMESTAMP` | ✅ |
-| DATETIME | DATETIME(22) | `TIMESTAMP` | ✅ |
-| TIMESTAMPTZ | TIMESTAMPTZ(29) | `TIMESTAMP` | ⚠️ |
-| TIMESTAMPLTZ | TIMESTAMPLTZ(30) | `TIMESTAMP` | ⚠️ |
-| DATETIMETZ | DATETIMETZ(31) | `TIMESTAMP` | ⚠️ |
-| DATETIMELTZ | DATETIMELTZ(32) | `TIMESTAMP` | ⚠️ |
-| SET | SET(16) | `OTHER` | ⚠️ |
-| MULTISET | MULTISET(17) | `OTHER` | ⚠️ |
-| LIST / SEQUENCE | SEQUENCE(18) | `OTHER` | ⚠️ |
-| BLOB | BLOB(23) | `BLOB` | ✅ |
-| CLOB | CLOB(24) | `CLOB` | ✅ |
-| ENUM | ENUM(25) | `VARCHAR` | ✅ |
-| JSON | JSON(34) | `VARCHAR` | ⚠️ 표준 부재 |
-| object / OID | OBJECT(19) | `OTHER` | ✅ |
-| (NULL 타입 컬럼) | NULL(0) | `OTHER` | ⚠️ `Types.NULL` 주석 처리됨 |
+| 1 | BIT | `BIT` | |
+| 2 | NUMERIC | `TINYINT` | ⚠️ 이름-타입 불일치(오류로 보임) |
+| 3 | NUMERIC | `BIGINT` | ⚠️ 동상 |
+| 4 | BIT VARYING | `LONGVARBINARY` | |
+| 5 | BIT VARYING | `VARBINARY` | |
+| 6 | BIT | `BINARY` | |
+| 7 | VARCHAR | `LONGVARCHAR` | |
+| 8 | CHAR | `CHAR` | |
+| 9 | NUMERIC | `NUMERIC` | |
+| 10 | INTEGER | `INTEGER` | |
+| 11 | BIGINT | `BIGINT` | |
+| 12 | SMALLINT | `SMALLINT` | |
+| 13 | DOUBLE | `FLOAT` | ⚠️ 이름 DOUBLE인데 `FLOAT` |
+| 14 | FLOAT | `REAL` | |
+| 15 | DOUBLE | `DOUBLE` | |
+| 16 | VARCHAR | `VARCHAR` | |
+| 17 | STRING | `VARCHAR` | |
+| 18 | DATE | `DATE` | |
+| 19 | TIME | `TIME` | |
+| 20 | TIMESTAMP | `TIMESTAMP` | |
+| 21 | TIMESTAMPTZ | `TIMESTAMP_WITH_TIMEZONE` | ⚠️ 표 A·B는 `TIMESTAMP` |
+| 22 | TIMESTAMPLTZ | `TIMESTAMP_WITH_TIMEZONE` | ⚠️ |
+| 23 | DATETIME | `TIMESTAMP` | |
+| 24 | DATETIMETZ | `TIMESTAMP_WITH_TIMEZONE` | ⚠️ |
+| 25 | DATETIMELTZ | `TIMESTAMP_WITH_TIMEZONE` | ⚠️ |
+| 26 | BLOB | `BLOB` | |
+| 27 | CLOB | `CLOB` | |
+| 28 | ENUM | `VARCHAR` | |
+| 29 | MULTISET | `ARRAY` | ⚠️ 표 A·B는 `OTHER` |
+| 30 | SET | `ARRAY` | ⚠️ |
+| 31 | LIST | `ARRAY` | ⚠️ |
+| 32 | SEQUENCE | `ARRAY` | ⚠️ |
+| 33 | JSON | `VARCHAR` | |
 
-### 세 경로의 불일치
+### 표 A(RSMD) vs 표 B(getColumns) 차이 요약
 
-동일 타입인데 API마다 다른 값을 반환하는 지점:
+동일 컬럼을 두 API로 조회했을 때 값이 달라지는 지점.
 
-| 타입 | RSMD `getColumnType` | DBMD `getColumns` | DBMD `getTypeInfo` |
+| CUBRID 타입 | RSMD `getColumnType` | DBMD `getColumns` | 비고 |
 |---|---|---|---|
-| BIT | `BIT`(prec8) / `BINARY` | 항상 `BINARY` | `BIT`, `BINARY` 두 행 |
-| SET / MULTISET / LIST / SEQUENCE | `OTHER` | `OTHER` | `ARRAY` |
-| TIMESTAMPTZ·TIMESTAMPLTZ·DATETIMETZ·DATETIMELTZ | `TIMESTAMP` | `TIMESTAMP` | `TIMESTAMP_WITH_TIMEZONE` |
+| **BIT** | `BIT`(prec==8) / `BINARY` | 항상 `BINARY` | RSMD만 정밀도 8을 `BIT`으로 |
+| **NUMERIC** | mysql 모드에서 `DECIMAL` | 항상 `NUMERIC` | getColumns엔 mysql 분기 없음 |
+| **(NULL 타입)** | `OTHER` | 처리 없음(미설정) | getColumns는 항목 자체가 없음 |
 
-- RSMD ↔ getColumns의 per-column 실차이는 **BIT 한 곳**(+ NUMERIC의 mysql 모드 분기 유무, NULL 처리 여부)뿐. TZ·컬렉션은 두 경로가 일치한다.
-- 반면 **getTypeInfo만** TZ를 `TIMESTAMP_WITH_TIMEZONE`(JDBC 4.2), 컬렉션을 `ARRAY`로 광고하여 이탈한다.
-- getTypeInfo 자체 오류도 있음: TYPE_NAME "NUMERIC" 행이 `TINYINT`·`BIGINT`에 매핑되고, "DOUBLE" 행이 `FLOAT`에 매핑됨.
+그 외 타입은 두 API가 동일한 `java.sql.Types`를 반환한다. TZ 계열·컬렉션은 A·B가 서로 일치하지만 **표 C(getTypeInfo)와는 불일치**한다.
 
 ### 개별 이슈
 
-1. **TZ/LTZ 날짜·시간 4종** — 세 경로가 `TIMESTAMP` vs `TIMESTAMP_WITH_TIMEZONE`로 갈림. 타임존 정보 손실 + 내부 불일치. 가장 실질적인 오매핑 후보.
-2. **BIT(8)** — RSMD가 `Types.BIT` + 클래스 `java.lang.Boolean`로 보고. 1바이트 비트열이 Boolean으로 표현됨.
-3. **부호 없는 정수(USHORT/UINT/UBIGINT)** — RSMD·getColumns 어느 switch/체인에도 case가 없어 각각 `Types.NULL(0)` 또는 미설정. 그런데 클래스명(`findFQDN`)은 Short/Integer/Long로 정상 → 비대칭. 서버가 이 타입을 컬럼 타입으로 실제 방출하는지 도달성 확인 필요.
-4. **getTypeInfo 카탈로그 오류** — 위의 이름-타입 불일치 행들.
+1. **TZ/LTZ 날짜·시간 4종(TIMESTAMPTZ·TIMESTAMPLTZ·DATETIMETZ·DATETIMELTZ)** — 표 A·B는 전부 `TIMESTAMP`, 표 C는 `TIMESTAMP_WITH_TIMEZONE`(JDBC 4.2, 값 2014). 타임존 정보 손실 + 내부 불일치. 가장 실질적인 오매핑 후보.
+2. **BIT(8)** — RSMD가 `Types.BIT` + 클래스 `java.lang.Boolean`(`UColumnInfo.findFQDN`)로 보고. 1바이트 비트열이 Boolean으로 표현됨. 게다가 getColumns는 같은 컬럼을 `BINARY`로 봐 두 API가 갈린다.
+3. **부호 없는 정수(USHORT/UINT/UBIGINT)** — 표 A·B 어디에도 case가 없어 각각 `Types.NULL(0)`(A) 또는 미설정(B). 반면 클래스명은 Short/Integer/Long로 정상 → 비대칭. 서버가 이 타입을 컬럼 타입으로 실제 방출하는지 도달성 확인 필요.
+4. **getTypeInfo 카탈로그 오류** — TYPE_NAME "NUMERIC" 행이 `TINYINT`·`BIGINT`에, "DOUBLE" 행이 `FLOAT`에 매핑되는 등 이름-타입 불일치.
 
 ### 정상인데 오해하기 쉬운 것
 
-- **FLOAT → `REAL`은 정상.** JDBC 규약상 `REAL`=단정밀도(→`float`), `FLOAT`=배정밀도(→`double`). CUBRID FLOAT/REAL은 4바이트 단정밀도이므로 `Types.REAL`이 맞다. `Types.FLOAT`으로 바꾸면 오히려 틀린다.
+- **FLOAT → `REAL`은 정상.** JDBC 규약상 `REAL`=단정밀도(→Java `float`), `FLOAT`=배정밀도(→`double`). CUBRID FLOAT/REAL은 4바이트 단정밀도이므로 `Types.REAL`이 맞다. `Types.FLOAT`으로 바꾸면 오히려 틀린다.
 - **ENUM / JSON → `VARCHAR`** — 표준 매핑이 없는 타입이라 방어 가능한 선택.
 - **역방향(`setObject`)에는 `Types → U_TYPE` 스위치가 없다.** 값의 런타임 Java 클래스로 `U_TYPE`을 정한다(`UUType.getObjectDBtype`). `targetSqlType`은 NUMERIC/DECIMAL 스케일 조정 외엔 무시.
 
 ## 결론
 
-전수 대조 결과, **대부분의 스칼라 타입 매핑은 규약상 적절**하다(특히 오해하기 쉬운 FLOAT→REAL도 정상). 실제로 손봐야 할 후보는 다음 4가지로 좁혀진다.
+전수 대조 결과, **대부분의 스칼라 타입 매핑은 규약상 적절**하다(오해하기 쉬운 FLOAT→REAL도 정상). 세 경로의 per-column 차이는 사실상 BIT 한 곳이고, TZ·컬렉션은 **getTypeInfo만** 이탈한다. 실제로 손봐야 할 후보는 다음 4가지로 좁혀진다.
 
 1. TZ/LTZ 날짜·시간의 `TIMESTAMP` 매핑 및 세 경로 불일치
-2. BIT(8)의 Boolean 취급
+2. BIT(8)의 Boolean 취급 및 RSMD↔getColumns 불일치
 3. 부호 없는 정수의 `Types.NULL` 갭 (도달성 확인 후 판정)
 4. getTypeInfo 카탈로그의 이름-타입 불일치 행
 
@@ -104,7 +184,7 @@ NCHAR/NCHAR VARYING 매핑은 데드 경로(엔진 9.0 제거)이며, TIMETZ는 
 
 ## 다음 단계
 
-- TZ 계열·부호 없는 정수의 **실측 검증**: 실제 컬럼을 만들어 세 경로의 반환값을 대조(도달성/재현).
+- TZ 계열·부호 없는 정수의 **실측 검증**: 실제 컬럼을 만들어 세 경로(getColumnType / getColumns / getTypeInfo)의 반환값을 대조(도달성·재현).
 - 확인되면 이슈화 후 수정 제안(패치) — 특히 세 경로 간 일관성 확보.
 
 ## 참고
