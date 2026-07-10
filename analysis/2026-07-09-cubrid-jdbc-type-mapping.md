@@ -199,23 +199,37 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 | 32 | SEQUENCE | `ARRAY` | ⚠️ |
 | 33 | JSON | `VARCHAR` | |
 
-### 관찰 — 지점 간 불일치
+## API 불일치
 
-같은 CUBRID 타입이 지점마다 다른 `java.sql.Types`로 보고되는 곳:
+같은 CUBRID 타입인데 **어느 JDBC API로 조회하느냐에 따라 다른 `java.sql.Types`가 나오거나(내부 불일치), JDBC 규약과 어긋나는 지점**들. 소스 분석 + **라이브 CUBRID 실측**([실측 노트](2026-07-10-5db-jdbc-type-mapping-measured.md))으로 교차 확인함.
 
-- **NULL 처리 4갈래** — RSMD① `OTHER` / RSMD② `NULL` / getColumns 처리 없음 / getBestRowIdentifier `NULL`. RSMD①만 `OTHER`(그나마 `Types.NULL`이 주석 처리됨)로 이례적.
-- **BIT 처리 5갈래** — RSMD① `BIT`(prec==8)·`BINARY`+클래스 `Boolean`/`byte[]` · RSMD② 항상 `BIT`+`byte[]`(prec 1) · getColumns 항상 `BINARY` · getBestRowIdentifier **case 없음→null** · getTypeInfo `BIT`·`BINARY` 두 행. 한 타입이 지점마다 전부 다르게 나온다.
-- **TZ/LTZ 4종** — RSMD①·RSMD(해당없음)·getColumns·getBestRowIdentifier는 전부 `TIMESTAMP`, **getTypeInfo만** `TIMESTAMP_WITH_TIMEZONE`(JDBC 4.2, 값 2014). 타임존 정보 손실 + 내부 불일치. 가장 실질적인 오매핑 후보.
-- **컬렉션 SET/MULTISET/SEQUENCE** — RSMD①·getColumns는 `OTHER`, getTypeInfo만 `ARRAY`. (getBestRowIdentifier는 case 없음)
-- **부호 없는 정수 USHORT/UINT/UBIGINT** — 어느 지점에도 case가 없다. RSMD①/getColumns는 `Types.NULL(0)`/미설정. 반면 클래스명(`UColumnInfo.findFQDN`)만 Short/Integer/Long로 정상 → 비대칭. 서버가 이 타입을 컬럼 타입으로 방출하는지 도달성 확인 필요.
-- **getBestRowIdentifier의 BIT/VARBIT 누락** — 유니크 키에 비트열이 들어가면 `DATA_TYPE`이 null.
+### A. 지점 간 불일치 — 같은 타입, 지점마다 다른 값
 
-### 관찰 — 정상인데 오해하기 쉬운 것
+| CUBRID 타입 | RSMD① getColumnType | RSMD② 합성 | getColumns | getBestRowIdentifier | getTypeInfo |
+|---|---|---|---|---|---|
+| **BIT(8)** | `BIT`(+Boolean) | `BIT`(+byte[]) | `BINARY` | 없음→`—` | `BIT`·`BINARY` 두 행 |
+| **NULL 타입** | `OTHER` | `NULL` | 처리 없음 | `NULL` | — |
+| **TIMESTAMPTZ/LTZ·DATETIMETZ/LTZ** | `TIMESTAMP` | — | `TIMESTAMP` | `TIMESTAMP` | `TIMESTAMP_WITH_TIMEZONE` |
+| **SET/MULTISET/SEQUENCE** | `OTHER` | — | `OTHER` | 없음→`—` | `ARRAY` |
+| **NUMERIC** | `NUMERIC`(mysql=`DECIMAL`) | — | `NUMERIC` | `NUMERIC` | `NUMERIC` |
 
-- **FLOAT → `REAL`은 정상.** JDBC 규약상 `REAL`=단정밀도(→Java `float`), `FLOAT`=배정밀도(→`double`). CUBRID FLOAT/REAL은 4바이트 단정밀도이므로 `Types.REAL`이 맞다. `Types.FLOAT`으로 바꾸면 오히려 틀린다.
-- **`Types.FLOAT` ≡ `Types.DOUBLE`(둘 다 배정밀도).** getTypeInfo의 "DOUBLE→`Types.FLOAT`"(표 5의 13번)은 오류가 아니라 **정상**이다 — JDBC의 두 배정밀도 상수(FLOAT·DOUBLE)를 CUBRID `DOUBLE` 하나로 커버하는 것. `Types.REAL`(단정밀도)만 CUBRID `FLOAT`에 대응.
-- **ENUM / JSON → `VARCHAR`** — 표준 매핑이 없는 타입이라 방어 가능한 선택.
-- **역방향(`setObject`)에는 `Types → U_TYPE` 스위치가 없다.** 값의 런타임 Java 클래스로 `U_TYPE`을 정한다(`UUType.getObjectDBtype`). `targetSqlType`은 NUMERIC/DECIMAL 스케일 조정 외엔 무시.
+1. **BIT — 5갈래.** 지점마다 `BIT`/`BINARY`/`null`로, 클래스도 `Boolean`/`byte[]`로 갈린다. RSMD①은 정밀도 8일 때 `BIT`+`java.lang.Boolean`이라 **1바이트 비트열을 불리언으로** 표현(의미 왜곡). getColumns는 정밀도 무관 `BINARY`라 **같은 컬럼도 RSMD①과 값이 다르다**.
+2. **NULL 타입 — 4갈래.** RSMD①만 `OTHER`(코드상 `Types.NULL`이 주석 처리됨), RSMD②·getBestRowIdentifier는 `NULL`, getColumns는 항목 자체가 없음.
+3. **TZ/LTZ 4종 — getTypeInfo만 이탈.** getColumnType/getColumns/getBestRowIdentifier는 전부 `TIMESTAMP`인데 getTypeInfo만 `TIMESTAMP_WITH_TIMEZONE`(JDBC 4.2, 2014). 규약상은 후자가 정답이라(§B-9) **다수 지점이 손실 매핑**인 셈. → 가장 실질적인 오매핑 후보.
+4. **컬렉션 — getTypeInfo만 이탈.** getColumnType/getColumns는 `OTHER`, getTypeInfo만 `ARRAY`. 그런데 `getArray()`가 미구현이라 `ARRAY`는 **거짓 약속**(§B-8).
+5. **NUMERIC — mysql 모드 분기 비대칭.** RSMD①만 mysql 호환 모드에서 `DECIMAL`로 바꾸고, getColumns 등은 항상 `NUMERIC`. (기능상 큰 영향은 없으나 지점 간 불일치의 한 예.)
+
+### B. JDBC 규약과의 불일치 (버그성)
+
+6. **`getBestRowIdentifier`가 기본키(PK)를 반환하지 못함.** 메서드 본래 목적(최적 행 식별자=대개 PK)을 CUBRID가 충족 못함 — **PK-only 테이블은 빈 결과**(실측: PK 0/20 vs UNIQUE 20/20). 근본원인: 브로커 `sch_constraint`가 `PRIMARY_KEY(5)`를 클라이언트로 미전달 + 드라이버가 제약 타입 0(UNIQUE)만 수용. → [별도 버그 노트](../bug/2026-07-10-cubrid-getbestrowidentifier-ignores-pk.md).
+7. **`getTypeInfo`가 정렬되지 않음.** `sortTuples` 미호출(다른 메타데이터 메서드는 전부 정렬) → JDBC 규약의 "DATA_TYPE 순 + 근접순" 위반. 같은 `Types.BIGINT`에 대해 레거시 `NUMERIC` 행이 네이티브 `BIGINT` 행보다 앞서 매치될 수 있어, DDL 생성 도구가 BIGINT 컬럼을 NUMERIC으로 만들 위험.
+8. **`getTypeInfo`는 컬렉션을 `ARRAY`로 광고하나 `getArray()` 미구현.** `CUBRIDResultSet.getArray()`가 `UnsupportedOperationException`을 던진다 — `Types.ARRAY` 계약(→`java.sql.Array` 취득)을 이행 못 함. 실제 컬렉션은 `getObject()`가 자바 배열(`Integer[]` 등)로 반환하므로, getColumnType/getColumns의 `OTHER`가 실제 능력에 맞는 정직한 값이고 getTypeInfo의 `ARRAY`가 잘못.
+9. **TZ 타입의 손실 매핑(규약 관점).** 규약상 tz 인식 타입은 `Types.TIMESTAMP_WITH_TIMEZONE`(+`OffsetDateTime` 취득)이 정답인데, getTypeInfo를 제외한 지점은 `TIMESTAMP`로 오프셋을 잃는다. (§A-3의 내부 불일치와 같은 뿌리 — 모든 지점을 `TIMESTAMP_WITH_TIMEZONE`으로 통일하면 규약에도 부합.)
+10. **부호 없는 정수(USHORT/UINT/UBIGINT) 갭.** getColumnType/getColumns에 case가 없어 `Types.NULL(0)`/미설정으로 빠진다. 클래스명(`findFQDN`)만 Short/Integer/Long로 정상이라 **비대칭**. (서버가 이 타입을 컬럼 타입으로 방출하는지 도달성은 별도 확인.)
+
+### 근본 원인 — 매핑 로직 다중화
+
+위 불일치의 대부분은 **U_TYPE→`java.sql.Types` 매핑이 5개 지점에 각각 하드코딩**되어 발생한다. **단일 공유 매핑 함수로 통일**하면 A의 내부 불일치가 구조적으로 사라지고, 그 통일 시점에 B의 규약값(TZ→`TIMESTAMP_WITH_TIMEZONE`, 컬렉션은 `OTHER` 또는 `ARRAY`+`getArray()` 구현, getTypeInfo 정렬)을 한 곳에서 바로잡을 수 있다.
 
 ## 결론
 
@@ -229,7 +243,18 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 
 `NCHAR`/`NCHAR VARYING`·`MONETARY` 매핑은 데드 경로(엔진에서 제거된 타입; 단 MONETARY는 11.4 매뉴얼 문구가 아직 "제거될 예정")이며, TIMETZ는 CUBRID 타입이 아니어서 드라이버도 `/* unused */`로 일관된다.
 
+## 부록: 정상인데 오해하기 쉬운 것
+
+아래는 언뜻 오매핑처럼 보이지만 **규약상 정상**이라 손대면 안 되는 것들.
+
+- **FLOAT → `REAL`은 정상.** JDBC 규약상 `REAL`=단정밀도(→Java `float`), `FLOAT`=배정밀도(→`double`). CUBRID FLOAT/REAL은 4바이트 단정밀도이므로 `Types.REAL`이 맞다. `Types.FLOAT`으로 바꾸면 오히려 틀린다.
+- **`Types.FLOAT` ≡ `Types.DOUBLE`(둘 다 배정밀도).** getTypeInfo의 "DOUBLE→`Types.FLOAT`"(표 5의 13번)은 오류가 아니라 **정상**이다 — JDBC의 두 배정밀도 상수(FLOAT·DOUBLE)를 CUBRID `DOUBLE` 하나로 커버하는 것. `Types.REAL`(단정밀도)만 CUBRID `FLOAT`에 대응.
+- **ENUM / JSON → `VARCHAR`** — 표준 매핑이 없는 타입이라 방어 가능한 선택.
+- **역방향(`setObject`)에는 `Types → U_TYPE` 스위치가 없다.** 값의 런타임 Java 클래스로 `U_TYPE`을 정한다(`UUType.getObjectDBtype`). `targetSqlType`은 NUMERIC/DECIMAL 스케일 조정 외엔 무시.
+
 ## 참고
 
 - [CUBRID 11.4 매뉴얼 – 데이터 타입](https://www.cubrid.org/manual/ko/11.4/sql/datatype.html)
 - CUBRID JDBC 드라이버 소스: `UUType.java`(내부 타입 상수), `CUBRIDResultSetMetaData.java`(RSMD 생성자 ①·②), `CUBRIDDatabaseMetaData.java`(getColumns / getBestRowIdentifier / getTypeInfo), `UColumnInfo.java`(클래스명 매핑)
+- 실측 검증(5-DB): [2026-07-10-5db-jdbc-type-mapping-measured.md](2026-07-10-5db-jdbc-type-mapping-measured.md)
+- getBestRowIdentifier PK 버그: [2026-07-10-cubrid-getbestrowidentifier-ignores-pk.md](../bug/2026-07-10-cubrid-getbestrowidentifier-ignores-pk.md)
