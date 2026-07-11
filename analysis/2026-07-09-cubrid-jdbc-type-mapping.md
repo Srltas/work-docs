@@ -221,7 +221,7 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 
 ### B. JDBC 규약과의 불일치 (버그성)
 
-6. **`getBestRowIdentifier`가 기본키(PK)를 반환하지 못함.** 메서드 본래 목적(최적 행 식별자=대개 PK)을 CUBRID가 충족 못함 — **PK-only 테이블은 빈 결과**(실측: PK 0/20 vs UNIQUE 20/20). 근본원인: 브로커 `sch_constraint`가 `PRIMARY_KEY(5)`를 클라이언트로 미전달 + 드라이버가 제약 타입 0(UNIQUE)만 수용. → [별도 버그 노트](../bug/2026-07-10-cubrid-getbestrowidentifier-ignores-pk.md).
+6. **`getBestRowIdentifier`가 기본키(PK)를 반환하지 못함.** 메서드 본래 목적(최적 행 식별자=대개 PK)을 CUBRID가 충족 못함 — **PK-only 테이블은 빈 결과**(실측: PK 0/20 vs UNIQUE 20/20). 근본원인: 브로커 `sch_constraint`가 `PRIMARY_KEY(5)`를 클라이언트로 미전달 + 드라이버가 제약 타입 0(UNIQUE)만 수용. → [작업 기록 APIS-1086](../APIS-1086/APIS-1086-getbestrowidentifier-pk.md).
 7. **`getTypeInfo`가 정렬되지 않음.** `sortTuples` 미호출(다른 메타데이터 메서드는 전부 정렬) → JDBC 규약의 "DATA_TYPE 순 + 근접순" 위반. 같은 `Types.BIGINT`에 대해 레거시 `NUMERIC` 행이 네이티브 `BIGINT` 행보다 앞서 매치될 수 있어, DDL 생성 도구가 BIGINT 컬럼을 NUMERIC으로 만들 위험.
 8. **`getTypeInfo`는 컬렉션을 `ARRAY`로 광고하나 `getArray()` 미구현.** `CUBRIDResultSet.getArray()`가 `UnsupportedOperationException`을 던진다 — `Types.ARRAY` 계약(→`java.sql.Array` 취득)을 이행 못 함. 실제 컬렉션은 `getObject()`가 자바 배열(`Integer[]` 등)로 반환하므로, getColumnType/getColumns의 `OTHER`가 실제 능력에 맞는 정직한 값이고 getTypeInfo의 `ARRAY`가 잘못.
 9. **TZ 타입의 손실 매핑(규약 관점).** 규약상 tz 인식 타입은 `Types.TIMESTAMP_WITH_TIMEZONE`(+`OffsetDateTime` 취득)이 정답인데, getTypeInfo를 제외한 지점은 `TIMESTAMP`로 오프셋을 잃는다. (§A-3의 내부 불일치와 같은 뿌리 — 모든 지점을 `TIMESTAMP_WITH_TIMEZONE`으로 통일하면 규약에도 부합.)
@@ -257,4 +257,4 @@ if/else 체인에 항목 없음: `NULL(0)`, 부호 없는 정수 `USHORT`/`UINT`
 - [CUBRID 11.4 매뉴얼 – 데이터 타입](https://www.cubrid.org/manual/ko/11.4/sql/datatype.html)
 - CUBRID JDBC 드라이버 소스: `UUType.java`(내부 타입 상수), `CUBRIDResultSetMetaData.java`(RSMD 생성자 ①·②), `CUBRIDDatabaseMetaData.java`(getColumns / getBestRowIdentifier / getTypeInfo), `UColumnInfo.java`(클래스명 매핑)
 - 실측 검증(5-DB): [2026-07-10-5db-jdbc-type-mapping-measured.md](2026-07-10-5db-jdbc-type-mapping-measured.md)
-- getBestRowIdentifier PK 버그: [2026-07-10-cubrid-getbestrowidentifier-ignores-pk.md](../bug/2026-07-10-cubrid-getbestrowidentifier-ignores-pk.md)
+- getBestRowIdentifier PK 버그 → 작업 기록: [APIS-1086](../APIS-1086/APIS-1086-getbestrowidentifier-pk.md)
