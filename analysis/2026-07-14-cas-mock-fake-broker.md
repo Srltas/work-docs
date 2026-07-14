@@ -65,9 +65,19 @@ CUBRIDConnection.isValid(sec)                 # timeout<0 → 예외, u_con==nul
 - 관찰: 드라이버 "자체" 테스트의 주류는 (iii) 실 DB다. 업계 일반으로는 Testcontainers로 실 DB를 자동 프로비저닝하는 흐름도 있으나, **이 저장소의 현행은 컨테이너가 아니라 CTP가 사전 기동된 실 브로커에 접속하는 방식**이다(저장소에 Testcontainers/pom 없음).
 - (i) API 레벨 mock은 DB 없이 돌지만 드라이버 자체를 "대체"하므로 드라이버 와이어 로직 검증에는 쓸 수 없다(앱 개발자용).
 - (ii) 와이어 레벨 fake는 실 DB로 만들기 힘든 장애/경계 케이스에 한정해 선택적으로 쓰인다. 우리의 CAS mock이 정확히 이 범주다.
+- **가짜 서버는 두 flavor로 나뉜다** — 타 드라이버 조사에서 확인된 실제 관행:
+
+| flavor | 하는 일 | 프로토콜 구현 | 대표 선례 | 용도 |
+|--------|---------|:----:|----------|------|
+| 프록시 | 실 서버로 바이트 중계 + 고장 주입(끊기·hang·지연) | 불필요(중계만) | pgjdbc `StrangeProxyServer` | isValid 단절, socket/login 타임아웃, broken network |
+| 최소 가짜 서버 | 실 서버 없이 프로토콜 응답을 직접 조작 | 최소 구현 | MariaDB 최소 프로토콜 서버; MySQL Mock/커스텀 SocketFactory | 악성 서버·인증·TLS 경계; timeout·failover |
+
+- 즉 pgjdbc·MySQL·MariaDB 모두 (ii) 와이어레벨 fake를 **장애/경계 케이스에 한정**해 쓰며(기능·데이터 경로는 실 DB), 이는 우리 CAS mock의 목표 용도(isValid 죽은 커넥션 감지)와 정확히 일치한다.
 
 ### 5) A/B/C를 레벨에 매핑
-- **A(가짜 ServerSocket) = (ii)**. `cubrid.jdbc.jci` 내부에서 UConnection을 만들어 `casIp`/`casPort`를 로컬 가짜 서버로, `brokerVersion`을 V9↑로 세팅한 뒤 isValid를 호출한다. **프로덕션 코드 변경 0**, PowerMock 불필요, statusBroker의 실제 소켓·타임아웃·파싱 코드까지 검증. (완전 public 경로는 아님 — 연결 수립 계층은 우회하고 내부 패키지 접근을 사용한다.)
+- **A(가짜 ServerSocket) = (ii)**. 두 가지로 구현할 수 있다(공통: **프로덕션 코드 변경 0**, PowerMock 불필요).
+  - (a) **최소 가짜서버 + 내부 주입**: `cubrid.jdbc.jci` 내부에서 UConnection을 만들어 `casIp`/`casPort`를 로컬 가짜 서버로, `brokerVersion`을 V9↑로 세팅한 뒤 isValid를 호출. 실 서버 불필요·구현 단순. 단 완전 public 경로는 아니고(연결 수립 계층 우회) 내부 패키지 접근과 `brokerVersion` 수동 세팅이 필요하며, statusBroker의 소켓·타임아웃·파싱만 검증한다.
+  - (b) **프록시(pgjdbc식)**: 실 브로커 앞단에 포워딩 프록시를 두고 `jdbc:cubrid:localhost:<프록시포트>:...`로 접속 → 핸드셰이크를 실 브로커로 중계(→ `brokerVersion`·`casPort` 정상 세팅)한 뒤, isValid가 여는 statusBroker 새 소켓에 `-2`/끊기/hang을 주입. **공개경로 전체(DriverManager→isValid)를 검증하고 `brokerVersion` 함정·내부접근을 회피**한다. 대신 양방향 포워딩 프록시가 필요하고 실 브로커에 의존한다(CTP는 이미 브로커를 띄우므로 무방). → **isValid엔 (b) 선호.**
 - **B(PowerMock static stub) = (ii)를 소켓 없이 흉내내는 구현 기법**일 뿐 독립 레벨이 아니다. 구버전 PowerMock+javassist 조합의 VerifyError 리스크가 있고, 실제 소켓/타임아웃 코드는 미검증. → 지양.
 - **C(Mockito로 UConnection mock) = (i) 계열**. 드라이버 내부 경계를 mock해 상위(`CUBRIDConnection`)의 래퍼 로직만 검증. 죽은 CAS 감지 자체는 가려져 검증 못 함.
 
@@ -111,5 +121,6 @@ flowchart LR
 - Testcontainers JDBC support: https://java.testcontainers.org/modules/databases/jdbc/
 - MockRunner(JDBC): https://mockrunner.github.io/mockrunner/examplesjdbc.html
 - jOOQ, mock your database at the JDBC level: https://blog.jooq.org/easy-mocking-of-your-database/
+- 가짜/프록시 서버 선례: pgjdbc `StrangeProxyServer`(isValid·socketTimeout·broken network 테스트, `StatementTest`); MySQL Connector/J Mock/커스텀 SocketFactory(timeout·failover); MariaDB Connector/J 최소 프로토콜 가짜 서버(악성 서버·인증·TLS)
 - 내부 코드: `src/jdbc/cubrid/jdbc/jci/UConnection.java`(isValid·버전 게이트·필드), `src/jdbc/cubrid/jdbc/net/BrokerHandler.java`(statusBroker/statusRequest), `src/jdbc/cubrid/jdbc/driver/CUBRIDConnection.java`(isValid), 엔진 `src/broker/broker.c`("ST" 핸들러)·`src/broker/cas_common.h`(FN_STATUS)
 - 실행 하네스: CTP `JdbcLocalTest`(JUnit4·단일 JVM·per-test 타임아웃 없음·`src/` .class 스캔), CTP JDBC `run.sh`(드라이버 jar 교체→전체 javac→단일 JVM 실행); 기존 isValid 테스트는 `test_jdbc`의 `TestValid4`(유일, 실 DB), `cubrid.jdbc.jci` 내부 접근 선례는 `TestUConnection`·`TestCUBRIDIsolationLevel`
