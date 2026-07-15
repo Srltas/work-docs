@@ -1,8 +1,8 @@
 # APIS-1087 con 없이 생성되는 ResultSet의 createCUBRIDException NullPointerException
 
 - 이슈: https://jira.cubrid.org/browse/APIS-1087 (초안 작성, 등록 예정)
-- PR: (열리면 링크)
-- 상태: 드라이버 수정 + 회귀 TC 완료, 검증 통과, PR 대기
+- PR: 드라이버/테스트 각각 초안 작성, 생성 대기
+- 상태: 드라이버 수정 + 회귀 TC 완료, Docker/JUnit 검증 통과, 커밋 Conventional로 정리, PR 초안 작성
 - 날짜: 2026-07-13
 
 ## 요약
@@ -70,9 +70,15 @@ flowchart TD
   - 위 특수 ResultSet의 `close()`가 no-op이 되어 커서가 늦게 해제되는 문제(con+stmt 둘 다 null).
   - OUT 파라미터 전용 회귀 TC는 커서 반환 Java 저장 프로시저 인프라가 필요해 CTP 하네스 차원에서 별도 추가.
 
+## 리뷰 논의
+- 리뷰에서 "`getCUBRIDConnection()`이 null이면 `super(null, null)`로 con이 다시 null이 되어 `AfterNext()`/`checkGetXXXError()`의 NPE가 재발할 수 있다"는 지적이 있었다.
+- 이 수정은 그 위험을 새로 만들지 않는다. `CUBRIDOutResultSet` 생성자에는 이전부터 `ucon.getCUBRIDConnection().addOutResultSet(this)` 호출이 있어서, 그 값이 null이면 생성자에서 먼저 NPE가 난다. 그래서 con이 null인 result set은 애초에 만들어지지 못하고 위 메서드까지 도달하지 못한다. 추가한 `super(...)`는 null을 넘겨도 예외를 내지 않으므로 NPE 지점을 새로 만들거나 옮기지 않는다.
+- 이 경로에서는 `getCUBRIDConnection()`이 사실상 항상 값을 가진다. `CUBRIDConnection` 생성 시 `setCUBRIDConnection`으로 연결이 등록되고, 같은 `readData`가 BLOB/CLOB을 읽을 때도 `cubridcon`을 그대로 사용하기 때문이다.
+- null 상황까지 안전하게 다루려면 조용히 넘어가지 말고 명확한 예외로 fail-fast 해야 하며, 그것은 `readData` 전반에 걸친 별도 변경이다.
+
 ## 참고
 - JIRA: https://jira.cubrid.org/browse/APIS-1087 (등록 예정)
-- PR: (열리면 링크)
+- PR: 드라이버 "Fix NullPointerException on connection-less ResultSet", 테스트 "Add regression tests for connection-less ResultSet NPE" (각각 초안 작성, 생성 대기)
 - Branch: cubrid-jdbc https://github.com/Srltas/cubrid-jdbc/tree/APIS-1087 , cubrid-testcases-private https://github.com/Srltas/cubrid-testcases-private/tree/APIS-1087
-- Commit: 드라이버 `f704579`(con 주입); 테스트 `d4702ee3`(회귀 TC), `259a6247`(OID TC 수정), `3b3493fd`(에러코드 단언 + update-on-readonly)
+- Commit: 드라이버 `292a221` `fix(jdbc): inject connection into con-less resultset`, 테스트 `5c22c7a7` `test(jdbc): add con-null resultset regression tests` (회귀 TC 3커밋을 1개로 스쿼시). 메시지는 Conventional Commit 스타일로 정리.
 - 분석 노트: [con=null NPE](../bug/2026-07-11-createcubridexception-npe.md), [getGeneratedKeys 빈 결과셋(별도)](../bug/2026-07-12-getgeneratedkeys-empty-resultset.md)
