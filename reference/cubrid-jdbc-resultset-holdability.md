@@ -1,8 +1,8 @@
 # CUBRID JDBC ResultSet holdability 동작 전수 + RW/RO 실측
 
-- 분류: analysis
-- 날짜: 2026-07-20
-- 관련: [capability 감사](2026-07-17-cubrid-jdbc-capability-audit.md)(holdability를 PARTIAL로 지적한 상위 노트의 심화편)
+- 분류: reference
+- 날짜: 2026-07-20 (최초 작성, 살아있는 문서)
+- 관련: [capability 감사](../analysis/2026-07-17-cubrid-jdbc-capability-audit.md)(holdability를 PARTIAL로 지적한 상위 노트의 심화편)
 
 ## 요약
 
@@ -10,7 +10,7 @@
 
 ## 목적 / 배경
 
-[capability 감사](2026-07-17-cubrid-jdbc-capability-audit.md)에서 holdability를 PARTIAL(“`supportsResultSetHoldability` 무조건 true인데 브로커 미지원 시 조용히 강등, 그 경우 `getResultSetHoldability()`와 자기모순”)로 분류했다. 이 노트는 그 항목을 **코드 끝까지 추적 + 실서버 실측**으로 심화한다. 확인할 질문: (1) `getResultSetHoldability()`의 기본값과 결정 요인, (2) 브로커 설정 변경이 반환값을 바꾸는가, (3) `supportsResultSetHoldability()`는 어떻게 두어야 하는가, (4) RO 브로커에서도 제대로 동작하는가.
+[capability 감사](../analysis/2026-07-17-cubrid-jdbc-capability-audit.md)에서 holdability를 PARTIAL(“`supportsResultSetHoldability` 무조건 true인데 브로커 미지원 시 조용히 강등, 그 경우 `getResultSetHoldability()`와 자기모순”)로 분류했다. 이 노트는 그 항목을 **코드 끝까지 추적 + 실서버 실측**으로 심화한다. 확인할 질문: (1) `getResultSetHoldability()`의 기본값과 결정 요인, (2) 브로커 설정 변경이 반환값을 바꾸는가, (3) `supportsResultSetHoldability()`는 어떻게 두어야 하는가, (4) RO 브로커에서도 제대로 동작하는가.
 
 ## 대상 메서드와 반환 로직 (AS-IS)
 
@@ -89,4 +89,4 @@ flowchart TD
 - 클라이언트 드라이버: `CUBRIDDriver.java:87,298` · `ConnectionProperties.java:425,504` · `CUBRIDConnection.java:107,433,462-465,473-485,556` · `CUBRIDStatement.java:108-110,640-648` · `CUBRIDDatabaseMetaData.java:2647,2677` · `jci/UConnection.java:1693-1713` · `jci/UClientSideConnection.java:419-422`
 - 브로커/엔진 C: `cas_meta.c:40,175,245` · `cas_protocol.h:131` · `cas_execute.c:412-455` · `broker_config.h:148-154` · `boot_cl.c:1171-1174` · `error_code.h:686`(-581)
 - 스니펫: `HoldabilityVerify.java`(scratchpad; `<port> [RW|RO]` 인자, RW 실행 시 `hold_test` seed). 운영 함정 메모: cubrid broker restart를 tail/grep 파이프하면 hang(파일 리다이렉트로 회피).
-- 상위 노트: [capability 감사](2026-07-17-cubrid-jdbc-capability-audit.md)의 holdability 항목(PARTIAL) 심화편.
+- 상위 노트: [capability 감사](../analysis/2026-07-17-cubrid-jdbc-capability-audit.md)의 holdability 항목(PARTIAL) 심화편.
