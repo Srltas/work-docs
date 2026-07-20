@@ -6,7 +6,7 @@
 
 ## 요약
 
-CUBRID JDBC 드라이버가 컬럼 타입을 보고하는 5개 지점(ResultSetMetaData 생성자 2개, getColumns, getBestRowIdentifier, getTypeInfo)에 대해, U_TYPE 전수(0~34)의 반환값(java.sql.Types, 타입 이름, 클래스명, 크기류 컬럼)을 소스 기준 표로 정리했다.
+CUBRID JDBC 드라이버가 컬럼 타입을 보고하는 5개 지점(ResultSetMetaData 생성자 2개, getColumns, getBestRowIdentifier, getTypeInfo)에 대해, CUBRID 11.4가 제공하는 전 데이터 타입의 반환값(java.sql.Types, 타입 이름, 클래스명, 크기류 컬럼)을 소스 기준 표로 정리했다.
 
 ## 목적
 
@@ -30,81 +30,72 @@ flowchart TB
 
 ## 범위 / 방법
 
-- **대상 소스**: `CUBRID/cubrid-jdbc` 저장소, `v11.3.2.0053` 기반(정확히는 `v11.3.2.0053-12-ge4947d1`). 아래 line 번호는 이 시점 기준.
-  - RSMD ①: `src/jdbc/cubrid/jdbc/driver/CUBRIDResultSetMetaData.java` 생성자 `CUBRIDResultSetMetaData(UColumnInfo[])` line 62, `switch` line 99~449
-  - RSMD ②: 같은 파일 생성자 `CUBRIDResultSetMetaData(CUBRIDResultSetWithoutQuery)` line 453, `if` 체인 line 470~520
-  - getColumns: `src/jdbc/cubrid/jdbc/driver/CUBRIDDatabaseMetaData.java` line 1008, 타입 분기 line 1160~1248
-  - getBestRowIdentifier: 같은 파일 line 1408, `switch` line 1514~1620
-  - getTypeInfo: 같은 파일 line 1895~2355 (병렬 배열 33행)
-  - 클래스명 매핑: `src/jdbc/cubrid/jdbc/jci/UColumnInfo.java` `findFQDN` line 225
-  - 내부 타입 상수: `src/jdbc/cubrid/jdbc/jci/UUType.java` (`U_TYPE_*`, 0~34)
-- **타입 전수 기준**: `U_TYPE` 0~34 전부. `TIMETZ(33)`는 소스 주석부터 `/* unused */`, `RESULTSET(20)`은 결과셋 컬럼 타입으로 쓰이지 않는 내부 타입. `NCHAR(3)`/`VARNCHAR(4)`(9.0부터 엔진 제거)와 `MONETARY(10)`(11.4 매뉴얼 기준 deprecated)은 서버가 방출하지 않는 데드 경로지만 드라이버 코드에 매핑이 남아 있어 표에 포함하고 †로 표시했다.
+- **대상 소스**: `CUBRID/cubrid-jdbc` 저장소, `v11.3.2.0053` 기반.
+  - RSMD ①: `CUBRIDResultSetMetaData.java`의 생성자 `CUBRIDResultSetMetaData(UColumnInfo[])` (타입 `switch`)
+  - RSMD ②: 같은 파일의 생성자 `CUBRIDResultSetMetaData(CUBRIDResultSetWithoutQuery)` (`if` 체인)
+  - getColumns / getBestRowIdentifier / getTypeInfo: `CUBRIDDatabaseMetaData.java`
+  - 클래스명 매핑: `UColumnInfo.java`의 `findFQDN`, 내부 타입 상수: `UUType.java`(`U_TYPE_*`)
+- **타입 범위**: CUBRID 11.4가 제공하는 데이터 타입 전부(수치/문자/비트/날짜·시간/컬렉션/LOB/ENUM/JSON/OID)와, 실행 결과셋에서 실제 발생하는 NULL 타입 컬럼(예: `SELECT NULL`). 다음은 11.4 기준 제공되지 않으므로 표에서 제외했다(드라이버 코드에는 매핑이 잔존).
+  - `NCHAR` / `NCHAR VARYING`: 9.0부터 미지원(매뉴얼: "대신 CHAR, VARCHAR 타입을 사용").
+  - `MONETARY`: deprecated(매뉴얼: "제거될 예정이며 더 이상 사용을 권장하지 않는다").
+  - `USHORT`/`UINT`/`UBIGINT`, `RESULTSET`, `TIMETZ`: SQL 데이터 타입이 아닌 프로토콜 내부·미사용 상수.
 - **표기 규칙**:
   - `java.sql.Types` 상수는 `Types.` 접두어 생략. 문자열 반환값은 `"따옴표"`.
-  - `미분기` = 그 지점에 해당 타입 분기가 없음. RSMD 두 생성자는 배열 기본값이 남아 `getColumnType()=0`(상수값이 `Types.NULL`과 동일), `getColumnTypeName()=null`이 되고, getColumns/getBestRowIdentifier는 재사용하는 `value[]` 배열의 해당 칸을 덮어쓰지 않아 **이전 행 값이 잔존**한다(첫 행이면 null). `addTuple`이 배열을 복사하므로(CUBRIDResultSetWithoutQuery.java:920) 잔존 값은 행마다 굳는다.
+  - `미분기` = 그 지점에 해당 타입 분기가 없음. RSMD 두 생성자는 배열 기본값이 남아 `getColumnType()=0`(상수값이 `Types.NULL`과 동일), `getColumnTypeName()=null`이 되고, getColumns/getBestRowIdentifier는 재사용하는 `value[]` 배열의 해당 칸을 덮어쓰지 않아 **이전 행 값이 잔존**한다(첫 행이면 null).
   - getTypeInfo 열의 `행 없음` = 카탈로그 33행에 그 타입 행이 아예 없음.
 
 ## 발견 / 관찰
 
 ### 표 1. RSMD ① `CUBRIDResultSetMetaData(UColumnInfo[] col_info)`
 
-일반 SQL 쿼리 결과셋의 `ResultSetMetaData`. 표시 크기는 `getDefaultColumnDisplaySize()`(line 535) 기본값이며, 문자·비트 계열은 정밀도가 더 크면 정밀도로 올라간다.
+일반 SQL 쿼리 결과셋의 `ResultSetMetaData`가 반환하는 값.
 
-| # | CUBRID 타입 (별칭) | U_TYPE (값) | getColumnType | getColumnTypeName | getColumnClassName | 표시 크기 | line |
-|---|---|---|---|---|---|---|---|
-| 1 | SHORT / SMALLINT | SHORT(9) | `SMALLINT` | "SMALLINT" | java.lang.Short | 6 | :156 |
-| 2 | INTEGER / INT | INT(8) | `INTEGER` | "INTEGER" | java.lang.Integer | 11 | :167 |
-| 3 | BIGINT | BIGINT(21) | `BIGINT` | "BIGINT" | java.lang.Long | 20 | :173 |
-| 4 | NUMERIC / DECIMAL / DEC | NUMERIC(7) | `NUMERIC` | "NUMERIC" | java.math.BigDecimal | 40 | :198 |
-| 5 | FLOAT / REAL | FLOAT(11) | `REAL` | "FLOAT" | java.lang.Float | 13 | :179 |
-| 6 | DOUBLE / DOUBLE PRECISION | DOUBLE(12) | `DOUBLE` | "DOUBLE" | java.lang.Double | 23 | :185 |
-| 7 | MONETARY † | MONETARY(10) | `DOUBLE` | "MONETARY" | java.lang.Double | 23 | :205 |
-| 8 | CHAR / CHARACTER | CHAR(1) | `CHAR` | "CHAR" | java.lang.String | 1* | :102 |
-| 9 | VARCHAR / CHAR VARYING / STRING | VARCHAR(2) | `VARCHAR` | "VARCHAR" | java.lang.String | 1* | :111 |
-| 10 | NCHAR † | NCHAR(3) | `CHAR` | "NCHAR" | java.lang.String | 1* | :410 |
-| 11 | NCHAR VARYING † | VARNCHAR(4) | `VARCHAR` | "NCHAR VARYING" | java.lang.String | 1* | :419 |
-| 12 | ENUM | ENUM(25) | `VARCHAR` | "ENUM" | java.lang.String | 1* | :120 |
-| 13 | BIT (정밀도 8) | BIT(5) | `BIT` | "BIT" | java.lang.Boolean | 1* | :130 |
-| 14 | BIT (그 외 정밀도) | BIT(5) | `BINARY` | "BIT" | byte[] | 1* | :134 |
-| 15 | BIT VARYING | VARBIT(6) | `VARBINARY` | "BIT VARYING" | byte[] | 1* | :144 |
-| 16 | DATE | DATE(13) | `DATE` | "DATE" | java.sql.Date | 10 | :211 |
-| 17 | TIME | TIME(14) | `TIME` | "TIME" | java.sql.Time | 8 | :217 |
-| 18 | TIMESTAMP | TIMESTAMP(15) | `TIMESTAMP` | "TIMESTAMP" | java.sql.Timestamp | 19 | :223 |
-| 19 | TIMESTAMPTZ | TIMESTAMPTZ(29) | `TIMESTAMP` | "TIMESTAMPTZ" | java.sql.Timestamp | 82 | :229 |
-| 20 | TIMESTAMPLTZ | TIMESTAMPLTZ(30) | `TIMESTAMP` | "TIMESTAMPLTZ" | java.sql.Timestamp | 82 | :235 |
-| 21 | DATETIME | DATETIME(22) | `TIMESTAMP` | "DATETIME" | java.sql.Timestamp | 23 | :241 |
-| 22 | DATETIMETZ | DATETIMETZ(31) | `TIMESTAMP` | "DATETIMETZ" | java.sql.Timestamp | 86 | :247 |
-| 23 | DATETIMELTZ | DATETIMELTZ(32) | `TIMESTAMP` | "DATETIMELTZ" | java.sql.Timestamp | 86 | :253 |
-| 24 | SET | SET(16) | `OTHER` | "SET" | 요소 배열(표 1-1) | -1 | :270 |
-| 25 | MULTISET | MULTISET(17) | `OTHER` | "MULTISET" | 요소 배열(표 1-1) | -1 | :273 |
-| 26 | LIST / SEQUENCE | SEQUENCE(18) | `OTHER` | "SEQUENCE" | 요소 배열(표 1-1) | -1 | :278 |
-| 27 | BLOB | BLOB(23) | `BLOB` | "BLOB" | java.sql.Blob | -1 | :428 |
-| 28 | CLOB | CLOB(24) | `CLOB` | "CLOB" | java.sql.Clob | -1 | :434 |
-| 29 | JSON | JSON(34) | `VARCHAR` | "JSON" | java.lang.String | 1* | :440 |
-| 30 | object (OID) | OBJECT(19) | `OTHER` | "CLASS" | cubrid.sql.CUBRIDOID | 256 | :266 |
-| 31 | (NULL 타입 컬럼) | NULL(0) | `OTHER` | "" | "null" | 4 | :260 |
-| 32 | (부호 없는 정수) | USHORT(26) | 미분기: 0(=`NULL`) | 미분기: null | java.lang.Short | -1 | :447 |
-| 33 | (부호 없는 정수) | UINT(27) | 미분기: 0(=`NULL`) | 미분기: null | java.lang.Integer | -1 | :447 |
-| 34 | (부호 없는 정수) | UBIGINT(28) | 미분기: 0(=`NULL`) | 미분기: null | java.lang.Long | -1 | :447 |
-| 35 | (내부) | RESULTSET(20) | 미분기: 0(=`NULL`) | 미분기: null | "" | -1 | :447 |
-| 36 | (미사용) | TIMETZ(33) | 미분기: 0(=`NULL`) | 미분기: null | "" | -1 | :447 |
+**표시 크기**는 `getColumnDisplaySize()`의 반환값으로, 컬럼 값을 문자열로 출력할 때 필요한 최대 문자 수(폭)다. 예를 들어 INT는 11(`-2147483648`이 11자), BIGINT는 20, DATE는 10(`YYYY-MM-DD`), TIMESTAMPTZ는 82(TIMESTAMP 19자 + 타임존 문자열 여유 63자)다. 타입별 기본값이 드라이버에 고정되어 있고, 문자(CHAR/VARCHAR/ENUM/JSON)·비트(BIT/BIT VARYING) 계열은 컬럼 정밀도가 기본값보다 크면 정밀도로 올라간다(표의 `1*`). -1은 폭을 정할 수 없는 타입(컬렉션, LOB)이다.
 
-- `*` 문자(CHAR/VARCHAR/NCHAR/VARNCHAR/ENUM/JSON)·비트(BIT/BIT VARYING) 계열은 `정밀도 > 기본값`이면 표시 크기가 정밀도로 상승.
-- NULL 타입은 `Types.NULL`이 주석 처리되어 있고(:259) `OTHER`를 반환한다(:260). 미분기 타입의 0과 달리 명시적 `OTHER`다.
-- 클래스명(getColumnClassName)은 `UColumnInfo.findFQDN`(:225)이 담당한다. USHORT/UINT/UBIGINT는 여기엔 케이스가 있어(Short/Integer/Long) getColumnType(0)과 비대칭이다.
-- **MySQL 호환 빌드 분기**(`UJCIUtil.isMysqlMode`, 패키지명 3번째 세그먼트가 `mysql`인 별도 빌드에서만 true): INT의 이름이 "INT"(:162), NUMERIC이 `DECIMAL`/"DECIMAL"(:192)로 바뀌고, SHORT/INT는 표시 크기가 정밀도로, NUMERIC은 정밀도+1(스케일>0이면 +2)로 바뀐다.
-- Types 값에서 파생되는 boolean 메서드(두 생성자 공통): `isCaseSensitive()`는 CHAR/VARCHAR/LONGVARCHAR만 true(:632), `isSigned()`는 SMALLINT/INTEGER/NUMERIC/DECIMAL/REAL/DOUBLE만 true(:670)라 **BIGINT 컬럼은 isSigned()=false**, `isCurrency()`는 DOUBLE/REAL/NUMERIC이 true(:649, MySQL 모드는 항상 false).
+| # | CUBRID 타입 (별칭) | U_TYPE (값) | getColumnType | getColumnTypeName | getColumnClassName | 표시 크기 |
+|---|---|---|---|---|---|---|
+| 1 | SHORT / SMALLINT | SHORT(9) | `SMALLINT` | "SMALLINT" | java.lang.Short | 6 |
+| 2 | INTEGER / INT | INT(8) | `INTEGER` | "INTEGER" | java.lang.Integer | 11 |
+| 3 | BIGINT | BIGINT(21) | `BIGINT` | "BIGINT" | java.lang.Long | 20 |
+| 4 | NUMERIC / DECIMAL / DEC | NUMERIC(7) | `NUMERIC` | "NUMERIC" | java.math.BigDecimal | 40 |
+| 5 | FLOAT / REAL | FLOAT(11) | `REAL` | "FLOAT" | java.lang.Float | 13 |
+| 6 | DOUBLE / DOUBLE PRECISION | DOUBLE(12) | `DOUBLE` | "DOUBLE" | java.lang.Double | 23 |
+| 7 | CHAR / CHARACTER | CHAR(1) | `CHAR` | "CHAR" | java.lang.String | 1* |
+| 8 | VARCHAR / CHAR VARYING / STRING | VARCHAR(2) | `VARCHAR` | "VARCHAR" | java.lang.String | 1* |
+| 9 | ENUM | ENUM(25) | `VARCHAR` | "ENUM" | java.lang.String | 1* |
+| 10 | BIT (정밀도 8) | BIT(5) | `BIT` | "BIT" | java.lang.Boolean | 1* |
+| 11 | BIT (그 외 정밀도) | BIT(5) | `BINARY` | "BIT" | byte[] | 1* |
+| 12 | BIT VARYING | VARBIT(6) | `VARBINARY` | "BIT VARYING" | byte[] | 1* |
+| 13 | DATE | DATE(13) | `DATE` | "DATE" | java.sql.Date | 10 |
+| 14 | TIME | TIME(14) | `TIME` | "TIME" | java.sql.Time | 8 |
+| 15 | TIMESTAMP | TIMESTAMP(15) | `TIMESTAMP` | "TIMESTAMP" | java.sql.Timestamp | 19 |
+| 16 | TIMESTAMPTZ | TIMESTAMPTZ(29) | `TIMESTAMP` | "TIMESTAMPTZ" | java.sql.Timestamp | 82 |
+| 17 | TIMESTAMPLTZ | TIMESTAMPLTZ(30) | `TIMESTAMP` | "TIMESTAMPLTZ" | java.sql.Timestamp | 82 |
+| 18 | DATETIME | DATETIME(22) | `TIMESTAMP` | "DATETIME" | java.sql.Timestamp | 23 |
+| 19 | DATETIMETZ | DATETIMETZ(31) | `TIMESTAMP` | "DATETIMETZ" | java.sql.Timestamp | 86 |
+| 20 | DATETIMELTZ | DATETIMELTZ(32) | `TIMESTAMP` | "DATETIMELTZ" | java.sql.Timestamp | 86 |
+| 21 | SET | SET(16) | `OTHER` | "SET" | 요소 배열(표 1-1) | -1 |
+| 22 | MULTISET | MULTISET(17) | `OTHER` | "MULTISET" | 요소 배열(표 1-1) | -1 |
+| 23 | LIST / SEQUENCE | SEQUENCE(18) | `OTHER` | "SEQUENCE" | 요소 배열(표 1-1) | -1 |
+| 24 | BLOB | BLOB(23) | `BLOB` | "BLOB" | java.sql.Blob | -1 |
+| 25 | CLOB | CLOB(24) | `CLOB` | "CLOB" | java.sql.Clob | -1 |
+| 26 | JSON | JSON(34) | `VARCHAR` | "JSON" | java.lang.String | 1* |
+| 27 | object (OID) | OBJECT(19) | `OTHER` | "CLASS" | cubrid.sql.CUBRIDOID | 256 |
+| 28 | (NULL 타입 컬럼) | NULL(0) | `OTHER` | "" | "null" | 4 |
+
+- NULL 타입은 소스에 `Types.NULL`이 주석 처리되어 있고 `OTHER`를 반환한다. 미분기의 0과 달리 명시적 `OTHER`다.
+- 클래스명(getColumnClassName)은 `UColumnInfo.findFQDN`이 담당한다.
+- **MySQL 호환 빌드 분기**(`UJCIUtil.isMysqlMode`, 패키지명 3번째 세그먼트가 `mysql`인 별도 빌드에서만 true): INT의 이름이 "INT", NUMERIC이 `DECIMAL`/"DECIMAL"로 바뀌고, SHORT/INT는 표시 크기가 정밀도로, NUMERIC은 정밀도+1(스케일>0이면 +2)로 바뀐다.
+- Types 값에서 파생되는 boolean 메서드(두 생성자 공통): `isCaseSensitive()`는 CHAR/VARCHAR/LONGVARCHAR만 true, `isSigned()`는 SMALLINT/INTEGER/NUMERIC/DECIMAL/REAL/DOUBLE만 true라 **BIGINT 컬럼은 isSigned()=false**, `isCurrency()`는 DOUBLE/REAL/NUMERIC이 true(MySQL 모드는 항상 false).
 
 #### 표 1-1. 컬렉션(SET/MULTISET/SEQUENCE) 요소 타입 반환값
 
-컬렉션 컬럼에서 CUBRID 확장 API `getElementType()`/`getElementTypeName()`(비컬렉션 컬럼이면 예외)과 `getColumnClassName()`이 요소(base) 타입별로 반환하는 값. 요소 `switch`는 line 284~404, 클래스명은 `findFQDN`의 base 분기(line 280~333).
+컬렉션 컬럼에서 CUBRID 확장 API `getElementType()`/`getElementTypeName()`(비컬렉션 컬럼이면 예외)과 `getColumnClassName()`이 요소(base) 타입별로 반환하는 값. 11.4 기준 컬렉션 요소는 BLOB/CLOB을 제외한 타입이 허용된다(매뉴얼).
 
 | 요소 U_TYPE (값) | getElementType | getElementTypeName | getColumnClassName |
 |---|---|---|---|
 | CHAR(1) | `CHAR` | "CHAR" | java.lang.String[] |
 | VARCHAR(2) | `VARCHAR` | "VARCHAR" | java.lang.String[] |
-| NCHAR(3) † | `CHAR` | "NCHAR" | java.lang.String[] |
-| VARNCHAR(4) † | `VARCHAR` | "NCHAR VARYING" | java.lang.String[] |
 | ENUM(25) | `VARCHAR` | "ENUM" | java.lang.String[] |
 | BIT(5) (컬럼 정밀도 8) | `BIT` | "BIT" | java.lang.Boolean[] |
 | BIT(5) (그 외) | `BINARY` | "BIT" | byte[][] |
@@ -115,7 +106,6 @@ flowchart TB
 | FLOAT(11) | `REAL` | "FLOAT" | java.lang.Float[] |
 | DOUBLE(12) | `DOUBLE` | "DOUBLE" | java.lang.Double[] |
 | NUMERIC(7) | `NUMERIC` | "NUMERIC" | java.lang.Double[] (BigDecimal[] 아님) |
-| MONETARY(10) † | `DOUBLE` | "MONETARY" | java.lang.Double[] |
 | DATE(13) | `DATE` | "DATE" | java.sql.Date[] |
 | TIME(14) | `TIME` | "TIME" | java.sql.Time[] |
 | TIMESTAMP(15) | `TIMESTAMP` | "TIMESTAMP" | java.sql.Timestamp[] |
@@ -124,115 +114,107 @@ flowchart TB
 | DATETIME(22) | `TIMESTAMP` | "DATETIME" | java.sql.Timestamp[] |
 | DATETIMETZ(31) | `TIMESTAMP` | "DATETIMETZ" | java.sql.Timestamp[] |
 | DATETIMELTZ(32) | `TIMESTAMP` | "DATETIMELTZ" | java.sql.Timestamp[] |
-| NULL(0) | `NULL` | "" | "null" |
+| JSON(34) | `VARCHAR` | "JSON" | java.lang.String[] |
 | OBJECT(19) | `OTHER` | "CLASS" | cubrid.sql.CUBRIDOID[] |
 | SET(16)/MULTISET(17)/SEQUENCE(18) (중첩) | `OTHER` | "SET"/"MULTISET"/"SEQUENCE" | null |
-| BLOB(23) | 미분기: 0(=`NULL`) | 미분기: null | java.sql.Blob[] |
-| CLOB(24) | 미분기: 0(=`NULL`) | 미분기: null | java.sql.Clob[] |
-| JSON(34) | `VARCHAR` | "JSON" | java.lang.String[] |
-| USHORT(26)/UINT(27)/UBIGINT(28) | 미분기: 0(=`NULL`) | 미분기: null | Short[]/Integer[]/Long[] |
-| RESULTSET(20), TIMETZ(33) | 미분기: 0(=`NULL`) | 미분기: null | null |
+| NULL(0) (예: `SELECT {NULL}`) | `NULL` | "" | "null" |
 
-- BLOB/CLOB 요소는 요소 `switch`에 케이스가 없는데 `findFQDN`엔 있어(Blob[]/Clob[]) 여기서도 비대칭이다.
 - BIT 요소의 Boolean[]/byte[][] 판정 기준은 요소 정밀도가 아니라 **컬럼 정밀도**(`getColumnPrecision()==8`)다.
 
 ### 표 2. RSMD ② `CUBRIDResultSetMetaData(CUBRIDResultSetWithoutQuery r)`
 
 `DatabaseMetaData`가 돌려주는 합성 결과셋(getColumns, getTypeInfo, getTables 등 대부분의 DBMD 결과셋) 자체의 `ResultSetMetaData`. `switch`가 아니라 **독립 `if` 7개의 체인**이며, 합성 결과셋 컬럼 선언에 실제로 쓰이는 타입(VARCHAR/INT/SHORT/BIT/NULL 등)만 처리한다.
 
-| # | 처리 U_TYPE (값) | getColumnType | getColumnTypeName | getPrecision | getColumnClassName | line |
-|---|---|---|---|---|---|---|
-| 1 | BIT(5) | `BIT` | "BIT" | 1 (강제) | "byte[]" | :470 |
-| 2 | INT(8) | `INTEGER` | "INTEGER" | 10 (강제) | "java.lang.Integer" | :476 |
-| 3 | SHORT(9) | `SMALLINT` | "SMALLINT" | 5 (강제) | "java.lang.Short" | :482 |
-| 4 | VARCHAR(2) | `VARCHAR` | "VARCHAR" | 선언 정밀도 | "java.lang.String" | :488 |
-| 5 | ENUM(25) | `VARCHAR` | "ENUM" | 선언 정밀도 | "java.lang.String" | :497 |
-| 6 | JSON(34) | `VARCHAR` | "JSON" | 선언 정밀도 | "java.lang.String" | :506 |
-| 7 | NULL(0) | `NULL` | "" | 0 | "" | :515 |
-| - | 그 외 전 타입(28종) | 미분기: 0(=`NULL`) | 미분기: null | 0 | null | 해당 없음 |
+| # | 처리 U_TYPE (값) | getColumnType | getColumnTypeName | getPrecision | getColumnClassName |
+|---|---|---|---|---|---|
+| 1 | BIT(5) | `BIT` | "BIT" | 1 (강제) | "byte[]" |
+| 2 | INT(8) | `INTEGER` | "INTEGER" | 10 (강제) | "java.lang.Integer" |
+| 3 | SHORT(9) | `SMALLINT` | "SMALLINT" | 5 (강제) | "java.lang.Short" |
+| 4 | VARCHAR(2) | `VARCHAR` | "VARCHAR" | 선언 정밀도 | "java.lang.String" |
+| 5 | ENUM(25) | `VARCHAR` | "ENUM" | 선언 정밀도 | "java.lang.String" |
+| 6 | JSON(34) | `VARCHAR` | "JSON" | 선언 정밀도 | "java.lang.String" |
+| 7 | NULL(0) | `NULL` | "" | 0 | "" |
+| - | 그 외 U_TYPE 전부 | 미분기: 0(=`NULL`) | 미분기: null | 0 | null |
 
-- **생성자 ①과 다른 점**: BIT가 정밀도와 무관하게 항상 `BIT`이고 클래스명도 `byte[]`(① 은 정밀도 8일 때만 `BIT`+`Boolean`). NULL 타입은 ①의 `OTHER`와 달리 명시적 `NULL`.
-- 행 공통 고정값: `getScale()=0`, `getSchemaName()`/`getTableName()`="", `getColumnCharset()`=null, `isAutoIncrement()`=false. 표시 크기는 표 1과 같은 `getDefaultColumnDisplaySize()` 기본값이며 VARCHAR/ENUM/JSON은 선언 정밀도가 크면 정밀도로 상승.
+- **생성자 ①과 다른 점**: BIT가 정밀도와 무관하게 항상 `BIT`이고 클래스명도 `byte[]`(①은 정밀도 8일 때만 `BIT`+`Boolean`). NULL 타입은 ①의 `OTHER`와 달리 명시적 `NULL`.
+- 행 공통 고정값: `getScale()=0`, `getSchemaName()`/`getTableName()`="", `getColumnCharset()`=null, `isAutoIncrement()`=false. 표시 크기는 표 1과 같은 기본값 함수를 쓰며 VARCHAR/ENUM/JSON은 선언 정밀도가 크면 정밀도로 상승.
 - 합성 결과셋의 컬럼 선언은 7종 안에 들도록 설계되어 있으나(예: getColumns의 BUFFER_LENGTH는 `U_TYPE_NULL`로 선언), 선언이 이를 벗어나면 조용히 0/null이 된다.
 
 ### 표 3. DBMD `getColumns()` 의 DATA_TYPE / TYPE_NAME
 
-카탈로그 컬럼 조회 시 튜플의 `DATA_TYPE`(value[4])과 `TYPE_NAME`(value[5]). if-else 체인 line 1160~1248.
+카탈로그 컬럼 조회 시 튜플의 `DATA_TYPE`(value[4])과 `TYPE_NAME`(value[5]).
 
-| # | CUBRID 타입 (별칭) | U_TYPE (값) | DATA_TYPE | TYPE_NAME | line |
-|---|---|---|---|---|---|
-| 1 | SHORT / SMALLINT | SHORT(9) | `SMALLINT` | "SMALLINT" | :1182 |
-| 2 | INTEGER / INT | INT(8) | `INTEGER` | "INTEGER" | :1188 |
-| 3 | BIGINT | BIGINT(21) | `BIGINT` | "BIGINT" | :1185 |
-| 4 | NUMERIC / DECIMAL / DEC | NUMERIC(7) | `NUMERIC` | "NUMERIC" | :1191 |
-| 5 | FLOAT / REAL | FLOAT(11) | `REAL` | "FLOAT" | :1194 |
-| 6 | DOUBLE / DOUBLE PRECISION | DOUBLE(12) | `DOUBLE` | "DOUBLE PRECISION" | :1197 |
-| 7 | MONETARY † | MONETARY(10) | `DOUBLE` | "MONETARY" | :1200 |
-| 8 | CHAR / CHARACTER | CHAR(1) | `CHAR` | "CHAR" | :1167 |
-| 9 | VARCHAR / CHAR VARYING / STRING | VARCHAR(2) | `VARCHAR` | "VARCHAR" | :1170 |
-| 10 | NCHAR † | NCHAR(3) | `CHAR` | "NCHAR" | :1176 |
-| 11 | NCHAR VARYING † | VARNCHAR(4) | `VARCHAR` | "NCHAR VARYING" | :1179 |
-| 12 | ENUM | ENUM(25) | `VARCHAR` | "ENUM" | :1173 |
-| 13 | BIT (정밀도 무관) | BIT(5) | `BINARY` | "BIT" | :1161 |
-| 14 | BIT VARYING | VARBIT(6) | `VARBINARY` | "BIT VARYING" | :1164 |
-| 15 | DATE | DATE(13) | `DATE` | "DATE" | :1206 |
-| 16 | TIME | TIME(14) | `TIME` | "TIME" | :1203 |
-| 17 | TIMESTAMP | TIMESTAMP(15) | `TIMESTAMP` | "TIMESTAMP" | :1209 |
-| 18 | TIMESTAMPTZ | TIMESTAMPTZ(29) | `TIMESTAMP` | "TIMESTAMPTZ" | :1233 |
-| 19 | TIMESTAMPLTZ | TIMESTAMPLTZ(30) | `TIMESTAMP` | "TIMESTAMPLTZ" | :1236 |
-| 20 | DATETIME | DATETIME(22) | `TIMESTAMP` | "DATETIME" | :1212 |
-| 21 | DATETIMETZ | DATETIMETZ(31) | `TIMESTAMP` | "DATETIMETZ" | :1239 |
-| 22 | DATETIMELTZ | DATETIMELTZ(32) | `TIMESTAMP` | "DATETIMELTZ" | :1242 |
-| 23 | SET | SET(16) | `OTHER` | "SET" | :1218 |
-| 24 | MULTISET | MULTISET(17) | `OTHER` | "MULTISET" | :1221 |
-| 25 | LIST / SEQUENCE | SEQUENCE(18) | `OTHER` | "SEQUENCE" | :1224 |
-| 26 | BLOB | BLOB(23) | `BLOB` | "BLOB" | :1227 |
-| 27 | CLOB | CLOB(24) | `CLOB` | "CLOB" | :1230 |
-| 28 | JSON | JSON(34) | `VARCHAR` | "JSON" | :1245 |
-| 29 | object (OID) | OBJECT(19) | `OTHER` | "CLASS" | :1215 |
-| - | NULL(0), RESULTSET(20), USHORT(26), UINT(27), UBIGINT(28), TIMETZ(33) | 좌동 | 미분기: 이전 행 값 잔존(첫 행 null) | 좌동 | 해당 없음 |
+| # | CUBRID 타입 (별칭) | U_TYPE (값) | DATA_TYPE | TYPE_NAME |
+|---|---|---|---|---|
+| 1 | SHORT / SMALLINT | SHORT(9) | `SMALLINT` | "SMALLINT" |
+| 2 | INTEGER / INT | INT(8) | `INTEGER` | "INTEGER" |
+| 3 | BIGINT | BIGINT(21) | `BIGINT` | "BIGINT" |
+| 4 | NUMERIC / DECIMAL / DEC | NUMERIC(7) | `NUMERIC` | "NUMERIC" |
+| 5 | FLOAT / REAL | FLOAT(11) | `REAL` | "FLOAT" |
+| 6 | DOUBLE / DOUBLE PRECISION | DOUBLE(12) | `DOUBLE` | "DOUBLE PRECISION" |
+| 7 | CHAR / CHARACTER | CHAR(1) | `CHAR` | "CHAR" |
+| 8 | VARCHAR / CHAR VARYING / STRING | VARCHAR(2) | `VARCHAR` | "VARCHAR" |
+| 9 | ENUM | ENUM(25) | `VARCHAR` | "ENUM" |
+| 10 | BIT (정밀도 무관) | BIT(5) | `BINARY` | "BIT" |
+| 11 | BIT VARYING | VARBIT(6) | `VARBINARY` | "BIT VARYING" |
+| 12 | DATE | DATE(13) | `DATE` | "DATE" |
+| 13 | TIME | TIME(14) | `TIME` | "TIME" |
+| 14 | TIMESTAMP | TIMESTAMP(15) | `TIMESTAMP` | "TIMESTAMP" |
+| 15 | TIMESTAMPTZ | TIMESTAMPTZ(29) | `TIMESTAMP` | "TIMESTAMPTZ" |
+| 16 | TIMESTAMPLTZ | TIMESTAMPLTZ(30) | `TIMESTAMP` | "TIMESTAMPLTZ" |
+| 17 | DATETIME | DATETIME(22) | `TIMESTAMP` | "DATETIME" |
+| 18 | DATETIMETZ | DATETIMETZ(31) | `TIMESTAMP` | "DATETIMETZ" |
+| 19 | DATETIMELTZ | DATETIMELTZ(32) | `TIMESTAMP` | "DATETIMELTZ" |
+| 20 | SET | SET(16) | `OTHER` | "SET" |
+| 21 | MULTISET | MULTISET(17) | `OTHER` | "MULTISET" |
+| 22 | LIST / SEQUENCE | SEQUENCE(18) | `OTHER` | "SEQUENCE" |
+| 23 | BLOB | BLOB(23) | `BLOB` | "BLOB" |
+| 24 | CLOB | CLOB(24) | `CLOB` | "CLOB" |
+| 25 | JSON | JSON(34) | `VARCHAR` | "JSON" |
+| 26 | object (OID) | OBJECT(19) | `OTHER` | "CLASS" |
+| - | 그 외 U_TYPE(NULL 타입 포함) | 미분기: 이전 행 값 잔존(첫 행 null) | 좌동 | 좌동 |
 
 - **RSMD ①과 다른 점**: BIT가 정밀도 무관 항상 `BINARY`(①은 정밀도 8이면 `BIT`), DOUBLE의 TYPE_NAME이 "DOUBLE PRECISION"(①은 "DOUBLE"), NUMERIC에 MySQL 모드 분기 없음, NULL 타입 분기 자체가 없음.
 - 타입 무관 공통 컬럼: TABLE_CAT=null, TABLE_SCHEM/TABLE_NAME은 `소유자.클래스` 분리, COLUMN_SIZE=CHAR_OCTET_LENGTH=정밀도, DECIMAL_DIGITS=스케일, NUM_PREC_RADIX=10, BUFFER_LENGTH=SQL_DATA_TYPE=SQL_DATETIME_SUB=null, NULLABLE/IS_NULLABLE는 non-null 플래그, COLUMN_DEF=컬럼 기본값, ORDINAL_POSITION=속성 순서, REMARKS는 브로커가 주는 경우만.
-- 반환 전 `sortTuples("getColumns")`로 정렬한다(:1255).
+- 반환 전 `sortTuples("getColumns")`로 정렬한다.
 
 ### 표 4. DBMD `getBestRowIdentifier()` 의 DATA_TYPE / TYPE_NAME / COLUMN_SIZE
 
-행 식별자 후보 컬럼의 타입 보고. `switch` line 1514~1620. COLUMN_SIZE(value[4])는 수치 6종만 정밀도를 넣고 나머지는 0이다.
+행 식별자 후보 컬럼의 타입 보고. COLUMN_SIZE(value[4])는 수치 6종만 정밀도를 넣고 나머지는 0이다.
 
-| # | CUBRID 타입 | U_TYPE (값) | DATA_TYPE | TYPE_NAME | COLUMN_SIZE | line |
-|---|---|---|---|---|---|---|
-| 1 | SHORT / SMALLINT | SHORT(9) | `SMALLINT` | "SMALLINT" | 정밀도 | :1530 |
-| 2 | INTEGER / INT | INT(8) | `INTEGER` | "INTEGER" | 정밀도 | :1535 |
-| 3 | BIGINT | BIGINT(21) | `BIGINT` | "BIGINT" | 정밀도 | :1540 |
-| 4 | NUMERIC / DECIMAL / DEC | NUMERIC(7) | `NUMERIC` | "NUMERIC" | 정밀도 | :1555 |
-| 5 | FLOAT / REAL | FLOAT(11) | `REAL` | "FLOAT" | 정밀도 | :1550 |
-| 6 | DOUBLE / DOUBLE PRECISION | DOUBLE(12) | `DOUBLE` | "DOUBLE" | 정밀도 | :1545 |
-| 7 | CHAR / CHARACTER | CHAR(1) | `CHAR` | "CHAR" | 0 | :1515 |
-| 8 | VARCHAR / CHAR VARYING / STRING | VARCHAR(2) | `VARCHAR` | "VARCHAR" | 0 | :1520 |
-| 9 | ENUM | ENUM(25) | `VARCHAR` | "ENUM" | 0 | :1525 |
-| 10 | DATE | DATE(13) | `DATE` | "DATE" | 0 | :1560 |
-| 11 | TIME | TIME(14) | `TIME` | "TIME" | 0 | :1565 |
-| 12 | TIMESTAMP | TIMESTAMP(15) | `TIMESTAMP` | "TIMESTAMP" | 0 | :1570 |
-| 13 | TIMESTAMPTZ | TIMESTAMPTZ(29) | `TIMESTAMP` | "TIMESTAMPTZ" | 0 | :1595 |
-| 14 | TIMESTAMPLTZ | TIMESTAMPLTZ(30) | `TIMESTAMP` | "TIMESTAMPLTZ" | 0 | :1600 |
-| 15 | DATETIME | DATETIME(22) | `TIMESTAMP` | "DATETIME" | 0 | :1575 |
-| 16 | DATETIMETZ | DATETIMETZ(31) | `TIMESTAMP` | "DATETIMETZ" | 0 | :1605 |
-| 17 | DATETIMELTZ | DATETIMELTZ(32) | `TIMESTAMP` | "DATETIMELTZ" | 0 | :1610 |
-| 18 | BLOB | BLOB(23) | `BLOB` | "BLOB" | 0 | :1585 |
-| 19 | CLOB | CLOB(24) | `CLOB` | "CLOB" | 0 | :1590 |
-| 20 | JSON | JSON(34) | `VARCHAR` | "JSON" | 0 | :1615 |
-| 21 | (NULL 타입) | NULL(0) | `NULL` | "" | 0 | :1580 |
-| - | BIT(5), VARBIT(6), NCHAR(3) †, VARNCHAR(4) †, MONETARY(10) †, OBJECT(19), SET(16)/MULTISET(17)/SEQUENCE(18), RESULTSET(20), USHORT(26)/UINT(27)/UBIGINT(28), TIMETZ(33) | 좌동 | 미분기: 이전 행 값 잔존(첫 행 null) | 좌동 | 좌동 | 해당 없음 |
+| # | CUBRID 타입 | U_TYPE (값) | DATA_TYPE | TYPE_NAME | COLUMN_SIZE |
+|---|---|---|---|---|---|
+| 1 | SHORT / SMALLINT | SHORT(9) | `SMALLINT` | "SMALLINT" | 정밀도 |
+| 2 | INTEGER / INT | INT(8) | `INTEGER` | "INTEGER" | 정밀도 |
+| 3 | BIGINT | BIGINT(21) | `BIGINT` | "BIGINT" | 정밀도 |
+| 4 | NUMERIC / DECIMAL / DEC | NUMERIC(7) | `NUMERIC` | "NUMERIC" | 정밀도 |
+| 5 | FLOAT / REAL | FLOAT(11) | `REAL` | "FLOAT" | 정밀도 |
+| 6 | DOUBLE / DOUBLE PRECISION | DOUBLE(12) | `DOUBLE` | "DOUBLE" | 정밀도 |
+| 7 | CHAR / CHARACTER | CHAR(1) | `CHAR` | "CHAR" | 0 |
+| 8 | VARCHAR / CHAR VARYING / STRING | VARCHAR(2) | `VARCHAR` | "VARCHAR" | 0 |
+| 9 | ENUM | ENUM(25) | `VARCHAR` | "ENUM" | 0 |
+| 10 | DATE | DATE(13) | `DATE` | "DATE" | 0 |
+| 11 | TIME | TIME(14) | `TIME` | "TIME" | 0 |
+| 12 | TIMESTAMP | TIMESTAMP(15) | `TIMESTAMP` | "TIMESTAMP" | 0 |
+| 13 | TIMESTAMPTZ | TIMESTAMPTZ(29) | `TIMESTAMP` | "TIMESTAMPTZ" | 0 |
+| 14 | TIMESTAMPLTZ | TIMESTAMPLTZ(30) | `TIMESTAMP` | "TIMESTAMPLTZ" | 0 |
+| 15 | DATETIME | DATETIME(22) | `TIMESTAMP` | "DATETIME" | 0 |
+| 16 | DATETIMETZ | DATETIMETZ(31) | `TIMESTAMP` | "DATETIMETZ" | 0 |
+| 17 | DATETIMELTZ | DATETIMELTZ(32) | `TIMESTAMP` | "DATETIMELTZ" | 0 |
+| 18 | BLOB | BLOB(23) | `BLOB` | "BLOB" | 0 |
+| 19 | CLOB | CLOB(24) | `CLOB` | "CLOB" | 0 |
+| 20 | JSON | JSON(34) | `VARCHAR` | "JSON" | 0 |
+| 21 | (NULL 타입) | NULL(0) | `NULL` | "" | 0 |
+| - | BIT(5), VARBIT(6), object(19), SET(16)/MULTISET(17)/SEQUENCE(18) | 미분기: 이전 행 값 잔존(첫 행 null) | 좌동 | 좌동 | 좌동 |
 
 - **BIT / BIT VARYING에 case가 없다.** 5개 지점 중 유일하게 비트열을 전혀 처리하지 못하므로, 비트열 컬럼이 UNIQUE 키에 포함되면 DATA_TYPE/TYPE_NAME/COLUMN_SIZE가 미설정(잔존값)으로 나간다.
-- 동작 특성: 제약 타입 0(UNIQUE)인 제약만 스캔하고(:1459) 그중 컬럼 수가 가장 적은 것을 고른다. `scope`/`nullable` 파라미터는 무시된다. **SCOPE 컬럼(value[0])은 어디서도 설정하지 않아 전 행 null**이다. BUFFER_LENGTH=null, DECIMAL_DIGITS=스케일(:1512), PSEUDO_COLUMN=`bestRowNotPseudo`(:1496) 고정. 반환 전 `sortTuples` 정렬(:1628).
+- 동작 특성: 제약 타입 0(UNIQUE)인 제약만 스캔하고 그중 컬럼 수가 가장 적은 것을 고른다. `scope`/`nullable` 파라미터는 무시된다. **SCOPE 컬럼(value[0])은 어디서도 설정하지 않아 전 행 null**이다. BUFFER_LENGTH=null, DECIMAL_DIGITS=스케일, PSEUDO_COLUMN=`bestRowNotPseudo` 고정. 반환 전 `sortTuples` 정렬.
 
 ### 표 5. DBMD `getTypeInfo()` 카탈로그 (33행 전체)
 
-per-컬럼 조회가 아니라 역방향 카탈로그다: DATA_TYPE(`java.sql.Types`)을 키로 "그 JDBC 타입을 만들 때 쓸 CUBRID 네이티브 타입 이름(TYPE_NAME)"을 광고한다. 병렬 배열(line 1946~2328)을 순서 그대로 내보내며, **5개 지점 중 유일하게 `sortTuples`를 호출하지 않는다**(JDBC 규약은 DATA_TYPE 순 + 근접순 정렬 요구).
+per-컬럼 조회가 아니라 역방향 카탈로그다: DATA_TYPE(`java.sql.Types`)을 키로 "그 JDBC 타입을 만들 때 쓸 CUBRID 네이티브 타입 이름(TYPE_NAME)"을 광고한다. 병렬 배열을 순서 그대로 내보내며, **5개 지점 중 유일하게 `sortTuples`를 호출하지 않는다**(JDBC 규약은 DATA_TYPE 순 + 근접순 정렬 요구).
 
-행별로 값이 달라지는 컬럼 전부를 표기한다. 대소문자(CASE_SENSITIVE)·검색(SEARCHABLE)·부호(UNSIGNED_ATTRIBUTE)·고정정밀도(FIXED_PREC_SCALE)·최대스케일(MAX_SCALE) 열은 각각 column8/9/10/11/15 배열 값이다. SEARCHABLE의 `basic`=`typePredBasic`(2, WHERE 비교만), `searchable`=`typeSearchable`(3, LIKE 포함 전부).
+행별로 값이 달라지는 컬럼 전부를 표기한다. SEARCHABLE의 `basic`=`typePredBasic`(2, WHERE 비교만), `searchable`=`typeSearchable`(3, LIKE 포함 전부).
 
 | # | TYPE_NAME | DATA_TYPE | PRECISION | 리터럴 접두/접미 | CREATE_PARAMS | CASE_SENS | SEARCHABLE | UNSIGNED | FIXED_PREC | MAX_SCALE |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -271,7 +253,7 @@ per-컬럼 조회가 아니라 역방향 카탈로그다: DATA_TYPE(`java.sql.Ty
 | 33 | JSON | `VARCHAR` | 1073741823 | ' / ' | null | false | basic | true | false | 0 |
 
 - 전 행 고정값 컬럼: NULLABLE=`typeNullable`(1), AUTO_INCREMENT=false, LOCAL_TYPE_NAME=TYPE_NAME과 동일 배열, MINIMUM_SCALE=0, SQL_DATA_TYPE=SQL_DATETIME_SUB=null, NUM_PREC_RADIX=10.
-- 카탈로그에 행이 없는 CUBRID 타입: MONETARY, NCHAR, NCHAR VARYING(엔진 제거 †), OID(OBJECT). 반대로 CUBRID에 없는 `TINYINT`용 NUMERIC(3) 행, 네이티브 BIGINT 이전의 레거시로 보이는 NUMERIC(38)→`BIGINT` 행이 있다.
+- OID(object) 타입의 행은 없다. 반대로 CUBRID에 없는 `TINYINT`용 NUMERIC(3) 행, 네이티브 BIGINT 이전의 레거시로 보이는 NUMERIC(38)→`BIGINT` 행이 있다.
 - **값 배열이 한 칸 밀린 정황**: CASE_SENSITIVE는 문자 계열인 16·17행(VARCHAR/STRING)이 false인데 수치인 15행(DOUBLE)이 true이고, SEARCHABLE은 7행(LONGVARCHAR)이 basic인데 9행(NUMERIC)이 searchable이다. 문자 계열에 줄 값이 인접 행으로 밀려 들어간 모양새다.
 - TZ 4종을 `TIMESTAMP_WITH_TIMEZONE`(JDBC 4.2)으로 광고하는 유일한 지점이다(표 1~4는 전부 `TIMESTAMP`).
 
@@ -285,11 +267,8 @@ per-컬럼 조회가 아니라 역방향 카탈로그다: DATA_TYPE(`java.sql.Ty
 | NUMERIC | `NUMERIC` (MySQL 빌드 `DECIMAL`) | 미분기 | `NUMERIC` | `NUMERIC` | `NUMERIC` (+TINYINT/BIGINT 대체 행) |
 | FLOAT | `REAL` | 미분기 | `REAL` | `REAL` | `REAL` |
 | DOUBLE | `DOUBLE` | 미분기 | `DOUBLE` | `DOUBLE` | `DOUBLE`+`FLOAT` 2행 |
-| MONETARY † | `DOUBLE` | 미분기 | `DOUBLE` | 미분기 | 행 없음 |
 | CHAR | `CHAR` | 미분기 | `CHAR` | `CHAR` | `CHAR` |
 | VARCHAR | `VARCHAR` | `VARCHAR` | `VARCHAR` | `VARCHAR` | `VARCHAR`+`LONGVARCHAR` 2행 (별칭 STRING 행도 `VARCHAR`) |
-| NCHAR † | `CHAR` | 미분기 | `CHAR` | 미분기 | 행 없음 |
-| NCHAR VARYING † | `VARCHAR` | 미분기 | `VARCHAR` | 미분기 | 행 없음 |
 | ENUM | `VARCHAR` | `VARCHAR` | `VARCHAR` | `VARCHAR` | `VARCHAR` |
 | BIT(8) | `BIT` | `BIT` | `BINARY` | 미분기 | `BIT` 행 |
 | BIT(n≠8) | `BINARY` | `BIT` | `BINARY` | 미분기 | `BINARY` 행 |
@@ -302,8 +281,6 @@ per-컬럼 조회가 아니라 역방향 카탈로그다: DATA_TYPE(`java.sql.Ty
 | JSON | `VARCHAR` | `VARCHAR` | `VARCHAR` | `VARCHAR` | `VARCHAR` |
 | object (OID) | `OTHER` | 미분기 | `OTHER` | 미분기 | 행 없음 |
 | NULL 타입 | `OTHER` | `NULL` | 미분기 | `NULL` | 행 없음 |
-| USHORT/UINT/UBIGINT | 미분기 | 미분기 | 미분기 | 미분기 | 행 없음 |
-| RESULTSET, TIMETZ | 미분기 | 미분기 | 미분기 | 미분기 | 행 없음 |
 
 ## 결론
 
@@ -320,9 +297,12 @@ per-컬럼 조회가 아니라 역방향 카탈로그다: DATA_TYPE(`java.sql.Ty
 
 ## 참고
 
-- CUBRID JDBC 드라이버 소스: [CUBRID/cubrid-jdbc](https://github.com/CUBRID/cubrid-jdbc) `v11.3.2.0053-12-ge4947d1`
+- CUBRID JDBC 드라이버 소스: [CUBRID/cubrid-jdbc](https://github.com/CUBRID/cubrid-jdbc) `v11.3.2.0053` 기반
   - `CUBRIDResultSetMetaData.java` (RSMD 생성자 ①·②, 기본 표시 크기)
   - `CUBRIDDatabaseMetaData.java` (getColumns / getBestRowIdentifier / getTypeInfo)
-  - `UColumnInfo.java` (findFQDN 클래스명 매핑), `UUType.java` (U_TYPE 상수 0~34)
+  - `UColumnInfo.java` (findFQDN 클래스명 매핑), `UUType.java` (U_TYPE 상수)
   - `CUBRIDResultSetWithoutQuery.java` (합성 결과셋, addTuple 복사 동작)
-- [CUBRID 11.4 매뉴얼, 데이터 타입](https://www.cubrid.org/manual/ko/11.4/sql/datatype.html) (NCHAR/NCHAR VARYING 9.0부터 미지원, MONETARY deprecated 문구 확인)
+- [CUBRID 11.4 매뉴얼, 데이터 타입](https://www.cubrid.org/manual/ko/11.4/sql/datatype.html)
+  - 컬렉션 요소: "BLOB, CLOB 타입을 제외한 나머지 타입들은 컬렉션 타입의 원소가 될 수 있다."
+  - "MONETARY 타입은 제거될 예정이며(deprecated), 더 이상 사용을 권장하지 않는다."
+  - "NCHAR, NCHAR VARYING 은 9.0 버전부터 더 이상 지원하지 않으며, 대신 CHAR, VARCHAR 타입을 사용하도록 한다."
