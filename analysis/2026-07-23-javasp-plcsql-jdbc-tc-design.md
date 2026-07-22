@@ -5,7 +5,7 @@
 - 관련: `analysis/2026-07-14-cas-mock-fake-broker.md`, `analysis/2026-07-14-jdbc-ctp-harness-gradle.md`, `analysis/2026-07-14-isvalid-proxy-vs-fakesocket.md`(장애 주입 방식 결론)
 
 ## 요약
-JDBC 드라이버의 CallableStatement OUT 파라미터 경로는 코드 전 구간에서 SP 구현 언어(JavaSP/PL/CSQL)와 무관함을 확정했고(정적 분석, 런타임 확증 필요), JavaSP로만 검증 가능한 표면 5가지를 별도로 확정했다. 이에 따라 JDBC TC는 "PL/CSQL 인라인 DDL(즉시) + JavaSP 프로비저닝(소수 정예) + fakeSocket(장애 주입) + FaultProxy(하네스 이후)"의 4계층으로 개선한다.
+JDBC 드라이버의 CallableStatement OUT 파라미터 경로는 코드 전 구간에서 SP 구현 언어(JavaSP/PL/CSQL)와 무관함을 확정했고(정적 분석, 런타임 확증 필요), JavaSP로만 검증 가능한 표면 5가지 + 버전 조건부 1가지(커서 결과셋 반환: CBRD-26955 이전 엔진에서는 JavaSP 전용)를 확정했다. 이에 따라 JDBC TC는 "PL/CSQL 인라인 DDL(즉시) + JavaSP 프로비저닝(소수 정예) + fakeSocket(장애 주입) + FaultProxy(하네스 이후)"의 4계층으로 개선한다.
 
 ## 목적
 JavaSP 특성(loadjava 등) 때문에 JUnit으로 TC 환경 구성이 안 되어 @Ignore로 남은 케이스들을 포함해, JDBC TC를 어떤 방향으로 개선할지 결정한다. 특히 "OUT 파라미터는 JavaSP로만 테스트 가능한가"라는 질문을 코드로 판정하고, pgjdbc/MySQL Connector/J의 방식과 타 DBMS의 아티팩트 배포 관행을 참고해 전체 설계를 도출한다.
@@ -82,9 +82,22 @@ sequenceDiagram
 | 3 | OBJECT(OID)·SET/MULTISET/SEQUENCE(·MONETARY) 파라미터 타입: PL/CSQL type_spec에 부재 | `semantic_check.c:9552-9568`, `jsp_cl.cpp:343-350`, `PlcParser.g4:614-660` |
 | 4 | 서버사이드 JDBC API 임의 사용(DatabaseMetaData, generated keys 콜백, OID, 임의 URL 프로퍼티): PL/CSQL 코드젠은 고정 패턴만 | `JavaCodeWriter.java:109-110,728-760`, `CUBRIDServerSideDriver.java:118-131`, `pl_executor.cpp:566-571` |
 | 5 | CURSOR '파라미터' 선언 문법(PL/CSQL은 SYS_REFCURSOR 파라미터 금지 s064). 단 아래 의심 지점 참조 | `csql_grammar.y:11797-11801`, `ParseTreeConverter.java:287-295` |
+| 6 | (버전 조건부) 커서 결과셋 반환(CUBRIDOutResultSet 생성원): CBRD-26955(2026-07-03) 이전 엔진에서는 JavaSP `RETURN CURSOR`가 유일 수단. 상세는 4-1 | 커밋 397486884, `ValueUtilities.java:138-149`, 공개 스위트 에러 케이스 |
 
-- PL/CSQL로 동등 재현 가능한 것: 기본 타입 OUT/INOUT, 결과셋 반환(JavaSP `RETURN CURSOR`와 PL/CSQL `RETURN SYS_REFCURSOR`가 PT_TYPE_RESULTSET으로 통합, `csql_grammar.y:3059-3071`, 드라이버 U_TYPE_RESULTSET→CUBRIDOutResultSet 동일 도달 `UStatement.java:2298-2303`), 서버 내 SQL, SP 내 COMMIT/ROLLBACK, 예외 전파.
+- PL/CSQL로 동등 재현 가능한 것: 기본 타입 OUT/INOUT, 서버 내 SQL, SP 내 COMMIT/ROLLBACK, 예외 전파. 결과셋 반환은 아래 4-1의 재조사 결과대로 "버전 조건부"다.
 - 의심 지점(이슈 후보): JavaSP의 CURSOR OUT 파라미터는 SQL 문법·엔진 검사는 있으나 pl_server `TargetMethod.argClassMap`에 java.sql.ResultSet 항목이 없어(미등록은 ClassNotFoundException) 정적으로는 시그니처 해석 단계 도달 불가로 보인다. `StoredProcedure.checkArgs`의 `ResultSet[].class` 분기(268행)는 죽은 코드 가능성.
+
+### 4-1) 재조사: 커서 결과셋(CUBRIDOutResultSet)은 "버전 조건부 JavaSP 전용"
+
+"커서 OUT 결과셋(CUBRIDOutResultSet)은 JavaSP로만 테스트 가능한 것 아닌가"라는 재질문에 대해 마샬링 체인 전체를 재검증했다. 초판의 "PL/CSQL `RETURN SYS_REFCURSOR`로 동등 재현 가능" 판정은 문법 통합과 드라이버 경로만 본 불완전한 결론이었고, 다음과 같이 정정한다.
+
+- 클라이언트가 커서 결과셋을 받는 경로는 사실상 함수 리턴 슬롯(`?=call`의 첫 `?`) 하나다. 커서 OUT '파라미터'(2번째 이후 위치)는 양쪽 모두 사실상 불가: PL/CSQL은 최상위 파라미터로 SYS_REFCURSOR 금지(s064, `ParseTreeConverter.java:287-295`), JavaSP는 DDL은 선언되지만 argClassMap 부재로 정적 도달 불가 의심(위 의심 지점).
+- 함수 리턴 경로의 PL/CSQL 마샬링 체인은 완결돼 있다(전부 직접 확인): SYS_REFCURSOR의 Java 표현은 `SpLib.Query`(`Type.java:143-147`, 커서는 서버사이드 JDBC의 `prepareStatement+executeQuery`로 연 `ResultSet rs` 보유, `SpLib.java:625-687`) → `ValueUtilities.createValueFrom`의 `instanceof Query` 분기가 `ResultSetValue(query.rs)`로 포장(`ValueUtilities.java:138-149`, 주석: query.close()는 서버측 질의 결과를 닫지 않아 결과가 살아남음) → `ResultSetValue`는 `CUBRIDServerSideResultSet.getQueryId()`로 queryId를 담는 JavaSP `instanceof ResultSet`(136행)과 동일 클래스·동일 메커니즘(`ResultSetValue.java:55-60`) → 이후 wire·드라이버 경로는 언어 공통(U_TYPE_RESULTSET → CUBRIDOutResultSet → MAKE_OUT_RS).
+- **그러나 이 체인 전체가 CBRD-26955(2026-07-03, develop 커밋 397486884 "support sys_refcursor in PL/CSQL stored function return type")에서 처음 추가된 것이다.** 같은 커밋이 문법(csql_grammar.y의 SYS_REFCURSOR 리턴 통합)과 pl_server의 `instanceof Query` 분기를 함께 도입했다(git log -S로 확인).
+- 그 이전 엔진에서는 최상위 PL/CSQL 함수의 `return sys_refcursor`가 CREATE 시점에 거부된다. 증거: 공개 cubrid-testcases(체크아웃 2026-06-25, 커밋보다 앞섬)의 에러 케이스 `_02_create_function/_11_common/cases/01_02_11-10_error_sys_refcursor_return_type.sql`(주석 "SYS_REFCURSOR may not be the return type of stored functions")과 그 answer의 문법 에러 -493(usage에 `RETURN {data_type|CURSOR}`만 표기). 1,250개 PL/CSQL 스위트 전체에 stored function이 SYS_REFCURSOR를 반환하는 정상 케이스는 0개다.
+- **판정: CBRD-26955 이전의 모든 엔진(현행 릴리스 라인 포함)에서 CUBRIDOutResultSet 경로를 만들 수 있는 SP는 JavaSP(`RETURN CURSOR ... AS LANGUAGE JAVA`)뿐이다. 재질문의 의심이 옳다.** CBRD-26955 이후 엔진에서만 PL/CSQL로도 가능하다(정적 체인 완결, 런타임 확증은 스파이크 필요).
+- TC 설계 함의: 드라이버의 CUBRIDOutResultSet 경로(getObject → createInstance/MAKE_OUT_RS → fetch, 커밋/롤백 시 일괄 close)를 전 지원 엔진 버전에서 검증하려면 **JavaSP `RETURN CURSOR` 버전이 필수**(Phase 2). PL/CSQL `RETURN SYS_REFCURSOR` 버전은 CBRD-26955+ 엔진 전용 케이스로 Phase 1에 추가하되, CREATE 실패 시 [SKIP]하는 프로브 게이트가 버전 분기를 자연스럽게 흡수한다.
+- 부수 관찰: 위 에러 케이스는 CBRD-26955 탑재 엔진에서는 기대 결과가 뒤집힐 것으로 보인다(스위트 갱신 필요 가능성). 실제 QA 런의 대상 엔진 버전은 미확인이라 단정하지 않는다.
 - 참고: 서버사이드 JDBC 클래스 13종은 드라이버 저장소가 아니라 pl_engine에만 존재하고, 드라이버에는 호출처 없는 `UJCIUtil.isServerSide()` 플래그만 남았다(`UJCIManager.connectServerSide`는 제거됨).
 
 ### 5) 드라이버 계약 발견 사항: TC가 명세로 고정해야 할 동작들
@@ -133,13 +146,14 @@ flowchart LR
   P3 --> P4
 ```
 
-- Phase 1: `createProcedure/createFunction` 헬퍼+생성 부기+@After 일괄 DROP(MySQL 방식), 실행 프로브 게이트(pgjdbc HStore 방식, 단 CTP 러너 제약상 Assume 대신 [SKIP] 로그+return).
-- Phase 2: 단기 JavaSpProvisioner(Runtime.exec loadjava, $CUBRID 부재 시 [SKIP]) + jdbc.conf 주입, 중기 run.sh 프로비저닝 훅(QA 협의, sql run.sh 선례 인용).
-- 종전 발언 정정: "OUT 파라미터는 PL/CSQL로 동일 검증 가능"은 근거 없는 단정이었고, 본 분석으로 "정적 코드상 성립, 런타임 확증 필요 + JavaSP 전용 표면 5가지 별도 존재"로 정정한다.
+- Phase 1: `createProcedure/createFunction` 헬퍼+생성 부기+@After 일괄 DROP(MySQL 방식), 실행 프로브 게이트(pgjdbc HStore 방식, 단 CTP 러너 제약상 Assume 대신 [SKIP] 로그+return). SYS_REFCURSOR 반환 케이스는 CBRD-26955+ 엔진 전용이며 프로브 게이트가 버전 분기를 흡수.
+- Phase 2: 단기 JavaSpProvisioner(Runtime.exec loadjava, $CUBRID 부재 시 [SKIP]) + jdbc.conf 주입, 중기 run.sh 프로비저닝 훅(QA 협의, sql run.sh 선례 인용). **CUBRIDOutResultSet 경로의 전 버전 커버는 이 계층의 JavaSP `RETURN CURSOR` 케이스가 담당**(4-1).
+- 종전 발언 정정 2건: (1) "OUT 파라미터는 PL/CSQL로 동일 검증 가능"은 근거 없는 단정이었고 "정적 코드상 성립, 런타임 확증 필요 + JavaSP 전용 표면 별도 존재"로 정정. (2) 초판의 "결과셋 반환은 PL/CSQL로 동등 재현 가능"도 불완전한 결론이었고 재조사로 "CBRD-26955 이전 엔진에서는 JavaSP 전용"으로 정정(4-1).
 
 ## 다음 단계
 - Phase 0 스파이크(실 서버 실행으로 unknowns 해소, TC 단언 수위 결정):
-  - S1: PL/CSQL 함수 `?=call` + registerOutParameter round-trip
+  - S1: PL/CSQL 함수 `?=call` + registerOutParameter round-trip. CBRD-26955+ 엔진에서는 `RETURN SYS_REFCURSOR` → getObject → CUBRIDOutResultSet 왕복 포함
+  - S1b: JavaSP `RETURN CURSOR` → CUBRIDOutResultSet 왕복(구버전 엔진 포함, 전 버전 커버 수단의 실동작 확인)
   - S2: PL/CSQL 프로시저 `call p(?)` OUT/INOUT round-trip, `?=` 없는 형태의 prepare 결과
   - S3: CALL_SP 튜플 attribute 0의 실체와 서버 parameterNumber
   - S4: CALL_SP에서 executeQuery 실제 반환값(null 추정 확인)
@@ -152,6 +166,7 @@ flowchart LR
 ## 참고
 - 드라이버: `cubrid-jdbc/src/jdbc/cubrid/jdbc/driver/CUBRIDCallableStatement.java`(등록 557-604, 조회 606-635, 미지원 목록 295-820), `driver/CUBRIDStatement.java`(getMoreResults 293-355, 605-638), `jci/UStatement.java`(prepare 응답 182-186, paramMode 전송 760-764, fetch 1204-1228, 튜플 2315-2359, RESULTSET 2298-2303), `jci/UBindParameter.java`(setOutParam 110-121, checkAllBinded 76-81), `jci/UResultInfo.java:53-61`, `driver/CUBRIDOutResultSet.java`
 - 엔진: `cubrid/src/parser/csql_grammar.y`(opt_in_out 18686-18703, pl_language_spec 11651-11685, CURSOR/SYS_REFCURSOR 3059-3080, 11797-11801), `src/parser/semantic_check.c:9522-9777`, `src/sp/jsp_cl.cpp`(타입 검사 335-380, OUT 회신 664-707, lang 디스패치 2117-2118), `src/sp/pl_executor.cpp`(단일 트랜스포트 364-386, 콜백 534-582), `src/broker/cas_execute.c`(?= 제거 684-752, fetch_call 1-tuple 9022-9042), `src/executables/loadjava.cpp:44-45, 278-312`
-- pl_engine: `pl_server/src/main/antlr/PlcParser.g4`(파라미터 51-58, 타입 614-660), `compiler/visitor/JavaCodeWriter.java:109-110, 377-379, 1530`, `jsp/TargetMethod.java:121-231`, `jsp/StoredProcedure.java:104-127, 194-199, 268-269, 356-368`, `jsp/ExecuteThread.java:492-515`, `jsp/jdbc/CUBRIDServerSideDriver.java`
+- pl_engine: `pl_server/src/main/antlr/PlcParser.g4`(파라미터 51-58, 타입 614-660), `compiler/visitor/JavaCodeWriter.java:109-110, 260, 377-379, 1530`, `compiler/type/Type.java:143-147`(SYS_REFCURSOR=SpLib.Query), `predefined/sp/SpLib.java:625-687`(Query 클래스), `jsp/value/ValueUtilities.java:136-149`(ResultSet/Query→ResultSetValue), `jsp/value/ResultSetValue.java:55-60`(queryId), `jsp/TargetMethod.java:121-231`, `jsp/StoredProcedure.java:104-127, 194-199, 268-269, 356-368`, `jsp/ExecuteThread.java:492-515`, `jsp/jdbc/CUBRIDServerSideDriver.java`
+- 커서 결과셋 버전 게이트: cubrid develop 커밋 397486884 "[CBRD-26955] support sys_refcursor in PL/CSQL stored function return type" (2026-07-03, v11.3-1205); 공개 cubrid-testcases `sql/_05_plcsql/_01_testspec/_01_basic_structure/_02_create_function/_11_common/cases/01_02_11-10_error_sys_refcursor_return_type.sql` + answers(문법 에러 -493 기대)
 - 테스트/하네스: test_jdbc `TestCUBRIDCallableStatement.java`, 이식 스위트(CallableStatementTest 계열 무력화), 공개 cubrid-testcases `sql/_05_plcsql`(OUT 모드 케이스 `_02_declaration/_01_parameter/_05_in_out_mode/`), `sql/_08_javasp`; CTP `sql/bin/run.sh:569-584`(loadjava 선례), `sql/src/.../SQLParser.java:173-193`, `ConsoleDAO.java:481-527`, `jdbc/bin/run.sh:180-182`(conf 주입), `shell/src/.../JdbcLocalTest.java:146-153`(Assume=OK 집계)
 - 외부: pgjdbc TESTING.md·docker/postgres-server·Jdbc3CallableStatementTest (https://github.com/pgjdbc/pgjdbc), MySQL Connector/J BaseTestCase·CHANGES WL#14042 (https://github.com/mysql/mysql-connector-j), Derby SQLJ.INSTALL_JAR (https://db.apache.org/derby/docs/10.9/ref/rrefstorejarinstall.html), SQL Server CREATE ASSEMBLY (https://learn.microsoft.com/en-us/sql/t-sql/statements/create-assembly-transact-sql), Oracle CREATE JAVA (https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/CREATE-JAVA.html), PL/Java sqlj.install_jar (https://tada.github.io/pljava/), CUBRID 매뉴얼은 미사용(로컬 코드 1차 소스)
