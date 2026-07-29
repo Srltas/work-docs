@@ -1,6 +1,6 @@
 # CUBRID JDBC: static protocolVersion 으로 인한 프로토콜 버전 오판
 
-- 분류: analysis
+- 분류: bug
 - 날짜: 2026-07-29
 - 관련: [cubrid-jdbc PR #83](https://github.com/CUBRID/cubrid-jdbc/pull/83) (APIS-1088), CBRD-23633, CBRD-23846
 
