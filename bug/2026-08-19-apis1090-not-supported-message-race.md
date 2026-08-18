@@ -225,4 +225,5 @@ flowchart TB
 ## 참고
 - 드라이버 diff: `upstream/develop...APIS-1090` (변경 파일 10개, 미지원 throw 273줄 전환)
 - 레이스 도입 커밋: `6688814 [CUBRIDSUS-7666] change the error code number` (2012-08-23)
+- 수정 설계: [CUBRID JDBC 에러 메시지 테이블 스레드 안전화 설계](../spec/2026-08-19-cubrid-jdbc-errorcode-thread-safety.md)
 - 관련 노트: [con 없이 생성되는 ResultSet의 createCUBRIDException NPE](2026-07-11-createcubridexception-npe.md)
