@@ -19,7 +19,7 @@ CMT의 레거시 단위 테스트(Eclipse PDE 프래그먼트)는 빌드에 포�
 flowchart TB
     A["메서드 1186개"] -->|"한 줄 반환, 대입, 위임 690개 제외"| B["로직 후보 496개"]
     B -->|"자명 27, 배관 101 제외"| C["선별 368개"]
-    C -->|"호출처 없음, 외부 자원 필요, 범위 밖 제외"| D["P7 TC 범위 285개"]
+    C -->|"호출처 없음, 외부 자원 필요, 범위 밖 제외"| D["P7 TC 범위 277개"]
     B -.->|"읽는 중 발견"| E["결함 152건, 보안 관찰 5종"]
     E -->|"실제 클래스로 실행"| F["재현 30건"]
 ```
@@ -126,10 +126,11 @@ flowchart TB
 
 | 처리 | 건수 |
 |---|---:|
-| TC 대상 | 114 |
+| TC 대상 | 111 |
 | 기록만 (호출처 없음) | 17 |
 | 기록만 (외부 자원 필요) | 5 |
 | 기록만 (범위 밖 클래스) | 8 |
+| 기록만 (범위에서 제외) | 3 |
 | 기록만 (규칙 없는 메서드) | 8 |
 
 <details>
@@ -315,9 +316,9 @@ flowchart TB
 
 | # | 위치 | 내용 | 수준 | 처리 | 비고 |
 |---:|---|---|---|---|---|
-| 131 | [`CUBRIDTrigger.setPriority:244`](https://github.com/CUBRID/cubrid-migration/blob/355a129e206ddb86fd4e905feb6bec18cafaaac5/plugins/com.cubrid.cubridmigration.core/src/com/cubrid/cubridmigration/cubrid/dbobj/CUBRIDTrigger.java#L244) | priority가 null이면 Double.parseDouble이 NullPointerException을 던져 catch(NumberFormatException)를 벗어남 (246행) | 후보 | TC 대상 |  |
-| 132 | [`CUBRIDTrigger.formatPriority:259`](https://github.com/CUBRID/cubrid-migration/blob/355a129e206ddb86fd4e905feb6bec18cafaaac5/plugins/com.cubrid.cubridmigration.core/src/com/cubrid/cubridmigration/cubrid/dbobj/CUBRIDTrigger.java#L259) | 기본 Locale의 DecimalFormat이라 소수점이 쉼표인 Locale에서 01,00이 되고 getDDL의 new BigDecimal이 실패해 'PRIORITY 00,00'이 나감 (261행, 298-306행) | 재현 | TC 대상 |  |
-| 133 | [`CUBRIDTrigger.getDDL:270`](https://github.com/CUBRID/cubrid-migration/blob/355a129e206ddb86fd4e905feb6bec18cafaaac5/plugins/com.cubrid.cubridmigration.core/src/com/cubrid/cubridmigration/cubrid/dbobj/CUBRIDTrigger.java#L270) | priority를 설정하지 않았으면 new BigDecimal(null)이 NullPointerException을 던져 catch(NumberFormatException)를 벗어남 (298행) | 후보 | TC 대상 |  |
+| 131 | [`CUBRIDTrigger.setPriority:244`](https://github.com/CUBRID/cubrid-migration/blob/355a129e206ddb86fd4e905feb6bec18cafaaac5/plugins/com.cubrid.cubridmigration.core/src/com/cubrid/cubridmigration/cubrid/dbobj/CUBRIDTrigger.java#L244) | priority가 null이면 Double.parseDouble이 NullPointerException을 던져 catch(NumberFormatException)를 벗어남 (246행) | 후보 | 기록만 (범위에서 제외) |  |
+| 132 | [`CUBRIDTrigger.formatPriority:259`](https://github.com/CUBRID/cubrid-migration/blob/355a129e206ddb86fd4e905feb6bec18cafaaac5/plugins/com.cubrid.cubridmigration.core/src/com/cubrid/cubridmigration/cubrid/dbobj/CUBRIDTrigger.java#L259) | 기본 Locale의 DecimalFormat이라 소수점이 쉼표인 Locale에서 01,00이 되고 getDDL의 new BigDecimal이 실패해 'PRIORITY 00,00'이 나감 (261행, 298-306행) | 재현 | 기록만 (범위에서 제외) |  |
+| 133 | [`CUBRIDTrigger.getDDL:270`](https://github.com/CUBRID/cubrid-migration/blob/355a129e206ddb86fd4e905feb6bec18cafaaac5/plugins/com.cubrid.cubridmigration.core/src/com/cubrid/cubridmigration/cubrid/dbobj/CUBRIDTrigger.java#L270) | priority를 설정하지 않았으면 new BigDecimal(null)이 NullPointerException을 던져 catch(NumberFormatException)를 벗어남 (298행) | 후보 | 기록만 (범위에서 제외) |  |
 
 </details>
 
