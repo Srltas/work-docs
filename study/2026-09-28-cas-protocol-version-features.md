@@ -1,4 +1,4 @@
-# CAS 요청 번호와 프로토콜 버전별 기능
+# CAS 요청 번호, 하위 타입과 프로토콜 버전별 기능
 
 - 분류: study
 - 날짜: 2026-09-28
@@ -35,6 +35,7 @@ sequenceDiagram
 - 드라이버: `CUBRID/cubrid-jdbc` develop(`6b4386b`)
 - 요청 번호: `enum t_cas_func_code`와 `cas.c`의 `server_fn_table`(번호 → 처리 함수). 애매한 번호는 처리 함수의 인자와 로그 문구로 역할을 확인
 - 요청 번호가 생긴 때: `src/broker/cas_protocol.h`에 대한 `git log -S`. 저장소의 첫 커밋이 2008 R1.0이라 그보다 이른 시점은 알 수 없다
+- 하위 타입: `broker_cas_cci.h`, `cas_protocol.h`의 enum과 define, 그리고 각 처리 함수(`cas_function.c`, `cas_xa.c`, `cas_execute.c`)의 분기. 스키마 정보 하위 타입이 생긴 때는 `src/broker`, `src/cci`에 대한 `git log -S`
 - 프로토콜 번호별 분기: `git grep -w PROTOCOL_Vn`. 본체 CAS 파일 기준으로 정리하고, CGW(`cas_cgw*.c`)와 샤드 프록시(`shard_proxy_*.c`)는 같은 분기를 반복하므로 따로 적지 않았다
 - JDBC: `UFunctionCode`와, 드라이버 코드에서 각 값을 참조하는지
 - 실측: 11.4.6 서버와 develop nightly(11.5.0.2608)에 접속해 드라이버가 받은 브로커 정보 8바이트를 읽었다
@@ -97,7 +98,90 @@ sequenceDiagram
 - 9.0.0 드라이버(프로토콜 V2와 정확히 같은 번호)만 41, 42번이 서로 바뀌어 있어서, CAS가 받을 때 번호를 바꿔 준다(`CAS_FC_*_FOR_PROTO_V2`).
 - JDBC의 "정의만"은 `UFunctionCode`에 값은 있지만 드라이버 코드에서 참조하지 않는다는 뜻이다. "없음"은 `UFunctionCode`에 값이 없다.
 
-### 2. 프로토콜 번호별로 본 요청 번호
+### 2. 요청 안의 하위 타입
+
+하위 타입은 프로토콜에 따로 있는 번호가 아니라, 요청 번호 뒤에 오는 인자 가운데 "무엇을 할지"를 고르는 값이다. 코드에서 부르는 이름은 요청마다 다르다(`schema_type`, `cmd`, `param_name`, `tran_type` 등). 요청은 요청 번호 1바이트 뒤에 인자를 차례로 싣고, 인자마다 앞에 길이 4바이트가 붙는다(`UOutputBuffer`).
+
+```
+요청      = [요청 번호] [길이][인자 1] [길이][인자 2] ...
+getTables = [09] [길이][1: CLASS] [길이]["%"] [길이](null) [길이][플래그 3] [길이][샤드 번호]
+```
+
+#### 2-1. 하위 타입을 받는 요청
+
+| 요청 번호 | 하위 타입 인자 | 값 | 모르는 값이 오면 |
+|---|---|---|---|
+| 1 `END_TRAN` | 1번째 `tran_type` | 1 COMMIT, 2 ROLLBACK | -10005 (`CAS_ER_TRAN_TYPE`) |
+| 4 `GET_DB_PARAMETER` | 1번째 `param_name` | 1 ISOLATION_LEVEL, 2 LOCK_TIMEOUT, 3 MAX_STRING_LENGTH, 5 NO_BACKSLASH_ESCAPES (내부용) | -10011 (`CAS_ER_PARAM_NAME`) |
+| 5 `SET_DB_PARAMETER` | 1번째 `param_name` | 1 ISOLATION_LEVEL, 2 LOCK_TIMEOUT, 4 AUTO_COMMIT | -10011 (`CAS_ER_PARAM_NAME`) |
+| 9 `SCHEMA_INFO` | 1번째 `schema_type` | 1~20 (2-2 표) | -10015 (`CAS_ER_SCHEMA_TYPE`) |
+| 17 `OID_CMD` | 1번째 `cmd` | 1 DROP, 2 IS_INSTANCE, 3 LOCK_READ, 4 LOCK_WRITE, 5 CLASS_NAME | -10001 (`CAS_ER_INTERNAL`) |
+| 18 `COLLECTION` | 1번째 `cmd` | 1 GET, 2 SIZE, 3 SET_DROP, 4 SET_ADD, 5 SEQ_DROP, 6 SEQ_INSERT, 7 SEQ_PUT | -10001 (`CAS_ER_INTERNAL`) |
+| 19 `NEXT_RESULT` | 2번째 `flag` | 1 KEEP_CURRENT_RESULT (현재 결과 유지), 그 외 값은 현재 결과를 닫음 | 해당 없음 |
+| 24 `GET_QUERY_INFO` | 2번째 `info_type` | 1 PLAN (R4.0 전에는 HISTOGRAM도 있었음) | 오류 없이 빈 결과 |
+| 26 `SAVEPOINT` | 1번째 `cmd` | 1 설정, 2 롤백 | -10001 (`CAS_ER_INTERNAL`) |
+| 30 `XA_END_TRAN` | 2번째 `tran_type` | 1 COMMIT, 2 ROLLBACK | -10005 (`CAS_ER_TRAN_TYPE`) |
+| 35 `LOB_NEW` | 1번째 `lob_type` | 23 BLOB, 24 CLOB | -10004 (`CAS_ER_ARGS`) |
+| 44 `CAS_CHANGE_MODE` | 1번째 `mode` | 1 AUTO, 2 KEEP | -10004 (`CAS_ER_ARGS`) |
+
+- 모르는 하위 타입 값은 모두 오류로 거절하거나 무시하고, 연결은 유지한다(`FN_KEEP_CONN`). 연결을 끊는 것은 모르는 요청 번호뿐이다(8절).
+- 7번 `CURSOR`도 기준(origin) 인자를 받지만, CAS는 이 값으로 분기하지 않고 결과 행 수만 돌려준다.
+- 8번 `FETCH`의 `fetch_flag`는 무엇을 할지 고르는 값이 아니라 내부 메모리 처리 플래그다.
+
+#### 2-2. 9번 `SCHEMA_INFO`의 하위 타입 1~20
+
+| 값 | 이름 | 돌려주는 것 | 인자 1 / 인자 2 | 생긴 때 | CAS 처리 함수 | JDBC 메서드 |
+|---|---|---|---|---|---|---|
+| 1 | `CLASS` | 클래스(테이블, 뷰) 목록 | 클래스 이름 / - | 2008 R1.0 | `sch_class_info` | getTables |
+| 2 | `VCLASS` | 뷰 목록 | 클래스 이름 / - | 2008 R1.0 | `sch_class_info` | 없음 |
+| 3 | `QUERY_SPEC` | 뷰의 정의 쿼리 | 뷰 이름 / - | 2008 R1.0 | `sch_queryspec` | 없음 |
+| 4 | `ATTRIBUTE` | 컬럼(속성) 목록 | 클래스 이름 / 컬럼 이름 | 2008 R1.0 | `sch_attr_info` | getColumns, getBestRowIdentifier |
+| 5 | `CLASS_ATTRIBUTE` | 클래스 속성 목록 | 클래스 이름 / 속성 이름 | 2008 R1.0 | `sch_attr_info` | 없음 |
+| 6 | `METHOD` | 메서드 목록 | 클래스 이름 / - | 2008 R1.0 | `sch_method_info` | 없음 |
+| 7 | `CLASS_METHOD` | 클래스 메서드 목록 | 클래스 이름 / - | 2008 R1.0 | `sch_method_info` | 없음 |
+| 8 | `METHOD_FILE` | 메서드 파일 목록 | 클래스 이름 / - | 2008 R1.0 | `sch_methfile_info` | 없음 |
+| 9 | `SUPERCLASS` | 상위 클래스 목록 | 클래스 이름 / - | 2008 R1.0 | `sch_superclass` | 없음 |
+| 10 | `SUBCLASS` | 하위 클래스 목록 | 클래스 이름 / - | 2008 R1.0 | `sch_superclass` | 없음 |
+| 11 | `CONSTRAINT` | 제약 조건, 인덱스 | 클래스 이름 / - | 2008 R1.0 | `sch_constraint` | getIndexInfo, getBestRowIdentifier |
+| 12 | `TRIGGER` | 트리거 목록 | 클래스 이름 / - | 2008 R1.0 | `sch_trigger` | 없음 |
+| 13 | `CLASS_PRIVILEGE` | 테이블 권한 | 클래스 이름 / - | 2008 R1.0 | `sch_class_priv` | getTablePrivileges |
+| 14 | `ATTR_PRIVILEGE` | 컬럼 권한 | 클래스 이름 / 컬럼 이름 | 2008 R1.0 | `sch_attr_priv` | getColumnPrivileges |
+| 15 | `DIRECT_SUPER_CLASS` | 직계 상위 클래스 | 클래스 이름 / - | 2008 R1.0 | `sch_direct_super_class` | getSuperTables |
+| 16 | `PRIMARY_KEY` | 기본 키 | 클래스 이름 / - | 2008 R1.0 | `sch_primary_key` | getPrimaryKeys |
+| 17 | `IMPORTED_KEYS` | 이 테이블이 참조하는 외래 키 | 클래스 이름 / - | 8.4.0 | `sch_imported_keys` | getImportedKeys |
+| 18 | `EXPORTED_KEYS` | 이 테이블을 참조하는 외래 키 | 클래스 이름 / - | 8.4.0 | `sch_exported_keys_or_cross_reference` | getExportedKeys |
+| 19 | `CROSS_REFERENCE` | 두 테이블 사이의 외래 키 | 기본 키 테이블 / 외래 키 테이블 | 8.4.0 | `sch_exported_keys_or_cross_reference` | getCrossReference |
+| 20 | `ATTR_WITH_SYNONYM` | 동의어가 가리키는 대상의 컬럼 | 이름 / 컬럼 이름 | 2023-08 (11.3, CBRD-24835) | `sch_attr_with_synonym_info` | 없음 |
+
+- 4번째 인자는 패턴 일치 플래그다. 1(`CCI_CLASS_NAME_PATTERN_MATCH`)이면 인자 1을, 2(`CCI_ATTR_NAME_PATTERN_MATCH`)이면 인자 2를 LIKE 패턴으로 본다. JDBC는 대부분 3(둘 다)을 보내고, getColumnPrivileges, getIndexInfo, getBestRowIdentifier는 2를 보낸다.
+- 5번째 인자는 V5부터 샤드 번호다.
+- develop의 `sch_class_info`는 인자 1에 `스키마.클래스` 형태도 받아, 점 앞을 소유자로 거른다.
+- JDBC `USchType`에는 1~19만 있고(11번 이름은 `SCH_CONSTRAIT`), 20번은 없다.
+- release/11.2에는 19번까지만 있다. 20번은 11.3부터다.
+
+#### 2-3. 비트 플래그를 받는 요청
+
+하위 타입과 달리, 여러 값을 비트로 겹쳐 한 인자에 보낸다. 이름은 `broker_cas_cci.h`의 `CCI_PREPARE_*`, `CCI_EXEC_*`, 괄호 안은 헤더의 주석이다.
+
+| 요청 번호 | 비트 | 이름 |
+|---|---|---|
+| 2 `PREPARE` | 0x01 | `INCLUDE_OID` |
+| 2 `PREPARE` | 0x02 | `UPDATABLE` |
+| 2 `PREPARE` | 0x04 | `QUERY_INFO` |
+| 2 `PREPARE` | 0x08 | `HOLDABLE` |
+| 2 `PREPARE` | 0x10 | `XASL_CACHE_PINNED` |
+| 2 `PREPARE` | 0x40 | `CALL` |
+| 3 `EXECUTE` | 0x01 | `ASYNC` (obsoleted) |
+| 3 `EXECUTE` | 0x02 | `QUERY_ALL` |
+| 3 `EXECUTE` | 0x04 | `QUERY_INFO` |
+| 3 `EXECUTE` | 0x08 | `ONLY_QUERY_PLAN` |
+| 3 `EXECUTE` | 0x10 | `THREAD` |
+| 3 `EXECUTE` | 0x20 | `NOT_USED` (not currently used) |
+| 3 `EXECUTE` | 0x40 | `RETURN_GENERATED_KEYS` |
+| 9 `SCHEMA_INFO` | 0x01 | `CLASS_NAME_PATTERN_MATCH` |
+| 9 `SCHEMA_INFO` | 0x02 | `ATTR_NAME_PATTERN_MATCH` |
+
+### 3. 프로토콜 번호별로 본 요청 번호
 
 | 프로토콜 | 이 번호부터 쓸 수 있는 요청 | 이 번호부터 형식이 바뀐 요청 | 요청 번호 밖의 변화 |
 |---|---|---|---|
@@ -116,7 +200,7 @@ sequenceDiagram
 | V11 | - | 33: 8바이트 query id (미만 드라이버에는 지원 안 함) | - |
 | V12 | - | - | 브로커 정보 [6]에 Oracle 호환 숫자 설정 |
 
-### 3. 접속 때 주고받는 값
+### 4. 접속 때 주고받는 값
 
 드라이버가 보내는 정보(10바이트, `enum t_driver_info_pos`)
 
@@ -146,7 +230,7 @@ CAS가 보내는 브로커 정보(8바이트, `enum t_broker_info_pos`). 두 서
 | [6] | 시스템 파라미터 (V12부터) | 00 |
 | [7] | 예약 | 00 |
 
-### 4. 프로토콜 번호 정의
+### 5. 프로토콜 번호 정의
 
 | 번호 | 정의 주석 (`cas_protocol.h`) | 도입 | CAS 분기 |
 |---|---|---|---|
@@ -166,7 +250,7 @@ CAS가 보내는 브로커 정보(8바이트, `enum t_broker_info_pos`). 두 서
 
 develop의 `CURRENT_PROTOCOL`은 V12다. V12의 정의 주석은 "double, float의 후행 0 제거"지만, 프로토콜로 바뀐 것은 그 동작을 켜는 시스템 파라미터를 브로커 정보에 실어 보내는 것이다(CBRD-24949 커밋 제목: "send oracle_compat_number_behavior system parameter to the clients").
 
-### 5. 근거 위치: 프로토콜 번호별로 CAS가 달리 하는 곳
+### 6. 근거 위치: 프로토콜 번호별로 CAS가 달리 하는 곳
 
 "V*n* 이상 드라이버에게는"이 기준이다. 위치는 `src/broker/` 기준 파일과 함수다.
 
@@ -193,7 +277,7 @@ develop의 `CURRENT_PROTOCOL`은 V12다. V12의 정의 주석은 "double, float�
 | V11 | OUT 결과셋 요청(`MAKE_OUT_RS`)을 8바이트 query id로 받는다 (미만은 지원 안 함으로 답한다) | `cas_function.c` `fn_make_out_rs` |
 | V12 | 브로커 정보 [6]에 `oracle_compat_number_behavior` 설정을 싣는다 | `cas_common_main.c` `cas_main_loop`, `cas_meta.c` |
 
-### 6. JDBC 드라이버가 프로토콜 번호를 쓰는 곳 (develop)
+### 7. JDBC 드라이버가 프로토콜 번호를 쓰는 곳 (develop)
 
 | 번호 | 드라이버가 하는 것 | 위치 |
 |---|---|---|
@@ -204,7 +288,7 @@ develop의 `CURRENT_PROTOCOL`은 V12다. V12의 정의 주석은 "double, float�
 
 holdable 결과 지원은 번호가 아니라 기능 비트 0x40으로 판단한다(`UConnection.supportHoldableResult()`가 `brokerInfoSupportHoldableResult()`만 본다).
 
-### 7. 프로토콜 번호를 올리지 않고 늘어난 것
+### 8. 프로토콜 번호를 올리지 않고 늘어난 것
 
 프로토콜 번호 체계(V0 ~ V2)가 생긴 2012-07 이후 기준이다.
 
@@ -238,7 +322,7 @@ holdable 결과 지원은 번호가 아니라 기능 비트 0x40으로 판단한
 
 ## 결론
 
-요청 번호는 2013년에 44번까지 채워진 뒤 늘지 않았다. 프로토콜 번호 체계가 생긴 뒤 새로 생긴 요청은 43번(샤드, V5)과 44번(번호를 올리지 않음) 둘뿐이다.
+요청 번호는 2013년에 44번까지 채워진 뒤 늘지 않았다. 기능은 요청 번호를 늘리는 대신 요청 안의 하위 타입으로 늘어났다. 하위 타입을 받는 요청은 12가지이고, 모두 모르는 값이 오면 오류로 거절하거나 무시하며 연결은 유지한다. 프로토콜 번호 체계가 생긴 뒤 새로 생긴 요청은 43번(샤드, V5)과 44번(번호를 올리지 않음) 둘뿐이다.
 
 프로토콜 번호를 올린 변경은 모두 옛 상대가 같은 바이트를 다르게 읽게 되는 경우였다. 타임아웃 단위(V2), 연결 응답 크기(V3, V4), 응답 끝에 붙는 필드(V5), 타입 바이트 수(V7), id 폭(V11), 브로커 정보 칸의 의미(V12)가 그렇다.
 
