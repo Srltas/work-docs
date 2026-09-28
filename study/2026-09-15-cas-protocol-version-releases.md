@@ -16,7 +16,7 @@ JDBC 드라이버가 "이 서버가 이 기능을 지원하는가"를 판별할 
 
 CUBRID 11.2부터 `schema.table` 형태를 지원한다. 그런데 JDBC 드라이버의 `supportsSchemasInDataManipulation` 계열은 서버 버전과 무관하게 고정값을 답한다. 드라이버가 지원하는 서버 범위에는 11.2 미만도 들어 있으므로, 고정값을 어느 쪽으로 바꾸든 절반은 틀린 답이 된다.
 
-드라이버에는 이미 프로토콜 버전으로 기능을 켜고 끄는 관례가 있다. 예를 들어 홀더블 결과셋은 `protocolVersion >= PROTOCOL_V12` 로 판별한다.
+드라이버에는 이미 프로토콜 버전으로 기능을 켜고 끄는 관례가 있다. 예를 들어 OUT 결과셋 번호의 폭(4바이트/8바이트)은 `brokerProtocolVersion() < PROTOCOL_V11` 로 가른다. (홀더블 결과셋은 번호가 아니라 브로커 정보의 기능 비트 0x40 으로 판별한다.)
 
 ## 범위 / 방법
 
@@ -104,9 +104,10 @@ if (protocolVersion < PROTOCOL_V8) { ... }
 
 - `supportsSchemasIn*` 계열을 `PROTOCOL_V11` 게이트로 바꾸는 작업을 이슈로 등록한다
 - 같은 스키마 계열인 `getSchemas()`, `getSchemaTerm()` 도 함께 본다. 값 하나씩 고치면 조합이 여전히 앞뒤가 안 맞는다
-- 프로토콜을 올리지 않은 기능이 있는지, 즉 이 표로 판별 못 하는 경우가 무엇인지 별도로 정리한다
+- 프로토콜을 올리지 않은 기능이 있는지, 즉 이 표로 판별 못 하는 경우가 무엇인지 별도로 정리한다 (정리함: [CAS 프로토콜 버전별 기능](2026-09-28-cas-protocol-version-features.md))
 
 ## 참고
 
 - 엔진 정의: `src/broker/cas_protocol.h` 의 `enum t_cas_protocol`
 - 드라이버 상수: `src/jdbc/cubrid/jdbc/jci/UConnection.java` 의 `PROTOCOL_V*`, `CAS_PROTOCOL_VERSION`
+- 관련 노트: [CAS 프로토콜 버전별 기능과, 번호 없이 늘어난 것들](2026-09-28-cas-protocol-version-features.md)
