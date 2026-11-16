@@ -5,7 +5,7 @@
 - 관련: `analysis/2026-07-14-jdbc-test-junit4-upgrade.md`(벤더 제거안), `analysis/2026-07-14-jdbc-ctp-harness-gradle.md`(Gradle 공존 하네스), `analysis/2026-07-23-javasp-plcsql-jdbc-tc-design.md`(신규 TC 설계), 사내 보고서 "phantom 정리·JUnit 4.13.2 검증"(2026-06-25), "CommentOut_ 비활성 TC 분석"(2026-07-02)
 
 ## 요약
-벤더 JUnit3 TC를 JUnit4로 바꾸지 않고, CTP의 `JdbcLocalTest`를 JUnit Platform(Vintage + Jupiter) 실행기로 먼저 교체한 뒤 JUnit 5로 직행한다(실측: 이 교체만으로 가짜 등록 733건이 파일 수정 없이 사라지고 실제 테스트 1,626건은 그대로 실행되며, 함께 필요한 작업은 JUnit 4.13.2와 PowerMock 2.x 상향뿐이다).
+벤더 JUnit3 TC를 JUnit4로 바꾸지 않고, CTP의 `JdbcLocalTest`를 JUnit Platform(Vintage + Jupiter) 실행기로 먼저 교체한 뒤 JUnit 5로 직행하며, JUnit jar는 브랜치별 TC lib이 소유한다(실측: 이 교체만으로 가짜 등록 733건이 파일 수정 없이 사라지고 실제 테스트 1,626건은 그대로 실행되며, 함께 필요한 작업은 JUnit 4.13.2와 PowerMock 2.x 상향뿐이다).
 
 ## 목적
 JUnit 3 스타일 벤더 TC(jTDS·PostgreSQL·MySQL 이식)를 JUnit 4로 먼저 바꾸는 것이 최종 목표(JUnit 5)에 맞는 첫 단계인지 판단한다. 맞지 않다면 문법 대신 바꿔야 할 지점인 CTP 실행기를 구현 가능한 수준으로 설계하고, 단계별 진행 계획을 세운다.
@@ -30,6 +30,11 @@ JUnit 3 스타일 벤더 TC(jTDS·PostgreSQL·MySQL 이식)를 JUnit 4로 먼저
   - 발견되는 테스트 집합은 Vintage가 감싸는 JUnit 4.13.2 러너가 정하므로 5.14.4와 같다고 판단했다.
   - JDK 17에서만 생기는 차이(PowerMock 1개 클래스)는 따로 표시했다.
 - 외부 확인: JUnit 5.14 사용자 가이드, JUnit 6.0 릴리스 노트, Maven Central 버전 목록, OpenRewrite 레시피 정의, MySQL Connector/J·pgjdbc 저장소 이력.
+- jar 위치 결정을 위해 추가로 확인한 것:
+  - 브랜치별 test_jdbc lib 비교(`git ls-tree`)와 CTP release 브랜치·develop 사이의 실행기 diff.
+  - 버전 호환 실측: 1.14.4 API로 컴파일한 실행기를 6.0.3 런타임에서 실행.
+  - `build.xml`의 JVM 옵션과 Ant 조건 처리를 JDK 8·17에서 직접 실행.
+  - JUnit 빌드 지원 문서, Ant `junitlauncher` 문서, SUREFIRE-1585, MySQL C/J `build.xml`.
 
 ## 발견 / 관찰
 
@@ -294,17 +299,73 @@ class PlatformJdbcCaseRunner {
 - `JdbcLocalTest.start()`는 모드만 판정한다. platform이면 위 클래스로 발견·실행하고, 출력 형식(`[TESTCASE]`, `[ELAPSE TIME(ms)]`, `[RUNTIME LOG]`)과 `onTestCaseStopEvent` 호출은 현행 `runTests()`와 같은 코드를 공유한다.
 - 레거시 경로(`getAllTestCase()`, `runTests()`)는 손대지 않는다.
 
-배포 구성:
+배포 구성(이렇게 나누는 근거는 아래 "jar 위치 결정"):
 
 | 위치 | 넣는 것 | 용도 |
 |---|---|---|
-| `cubrid-testtools` `CTP/jdbc/lib` | Platform launcher·engine·commons 1.14.4, opentest4j 1.3.0, apiguardian 1.1.2 | 실행기 컴파일 전용(빌드 classpath `libs`) |
+| `cubrid-testtools` `CTP/jdbc/lib` | 기존 junit-4.8.2 유지, Platform launcher·engine·commons 1.14.4, opentest4j 1.3.0, apiguardian 1.1.2 | 실행기 컴파일 전용(빌드 classpath `libs`) |
 | `cubrid-testtools` `CTP/shell/lib/cubridqa-shell.jar` | `ant dist`로 재생성 | 실행기 배포 |
 | `test_jdbc/lib` (develop만) | JUnit 4.13.2, hamcrest-core 1.3, Platform 1.14.4 세트, Jupiter 5.14.4(api·engine), Vintage 5.14.4, opentest4j 1.3.0, apiguardian 1.1.2, PowerMock 2.0.9 세트(6월 검증 조합) | 런타임과 TC 컴파일 |
 | `test_jdbc/lib`에서 제거 | `junit-4.8.1.jar`, `junit-4.8.2.jar`, PowerMock 1.4.12 계열 | 중복·비호환 제거 |
 
 - 롤백은 test_jdbc lib 커밋을 되돌리는 것으로 한다.
 - 시나리오에 JUnit 4.13.2를 둔 채 `jdbc_runner=legacy`로만 바꾸면 852건 오류가 다시 생긴다.
+
+### jar 위치 결정
+**결정: JUnit jar의 주인은 TC(`test_jdbc/lib`, 브랜치별)다. CTP(`CTP/jdbc/lib`)에는 실행기를 빌드할 때만 쓰는 API jar를 둔다.**
+
+현재 두 곳의 jar 역할:
+
+| 위치 | 현재 jar | 쓰이는 곳 |
+|---|---|---|
+| `test_jdbc/lib` | junit-4.8.1, junit-4.8.2 | CTP의 TC 컴파일(`run.sh:245`), TC 실행 classpath(`run.sh:257`), 로컬 Ant(`build.xml`), IDE(`.classpath`) |
+| `CTP/jdbc/lib` | junit-4.8.2 | CTP 자체 빌드(`CTP/build.xml`의 `libs`)만. 실행 classpath에는 없음 |
+
+- 지금도 실행 시점의 JUnit 버전은 TC가 정한다.
+
+CTP에 두지 않는 근거:
+
+| 근거 | 확인한 사실 |
+|---|---|
+| 버전이 브랜치마다 다르다 | TC의 release/10.1~11.4는 javassist 3.16.1, develop만 3.32.0(`git ls-tree`) |
+| 일괄 상향이 불가능하다 | 모든 release 브랜치가 PowerMock 1.4.12를 쓴다. JUnit 4.13.2와 함께 쓰면 7개 클래스 118건이 실패한다(실측) |
+| CTP 실행기는 버전 중립이다 | `JdbcLocalTest`와 `CTP/jdbc`가 CTP release/10.2·11.0·11.2·11.3과 develop에서 동일하다 |
+| 브랜치가 1:1이 아니다 | TC에는 release/11.4가 있지만 CTP에는 없다 |
+| jar는 한 세트여야 한다 | Platform 1.14.4와 Vintage 5.11.4를 섞자 Launcher가 발견을 거부했다(실측) |
+| 다른 도구의 관행 | JUnit 문서는 launcher까지 테스트 프로젝트에 선언해 런타임 classpath의 버전을 맞추라고 권한다. Surefire는 프로젝트 classpath 버전에 launcher를 맞춘다(SUREFIRE-1585). MySQL C/J는 프로젝트 `lib`의 jar를 `<junitlauncher>`로 실행한다 |
+| 로컬 실행 | TC 자체 빌드, IDE, CTP의 TC 컴파일이 모두 TC lib을 쓴다 |
+
+- JUnit을 CTP에 두면 그 CTP로 도는 모든 TC 브랜치가 같은 JUnit을 쓰게 된다. develop을 올리는 순간 release 브랜치가 깨진다.
+- API는 TC에, 엔진은 CTP에 나누면 업그레이드할 때마다 두 저장소와 모든 브랜치를 동시에 바꿔야 한다.
+
+CTP가 JUnit 버전을 몰라도 되는 근거(실측):
+- 1.14.4 API로 컴파일한 실행기(Java 8 바이트코드)를 6.0.3 런타임에서 돌렸다.
+- 6.0.3으로 컴파일한 실행기와 같은 1,694건을 발견했고, 단건 실행도 성공했다.
+- 조건 1: CTP는 지원할 가장 오래된 계열(Platform 1.x, Java 8)로 컴파일한다.
+- 조건 2: 실행기는 안정(stable) API만 쓴다.
+- 조건 3: 실행 시 TC가 제공하는 jar를 감지한다(auto 모드).
+
+최종 배치:
+
+| 위치 | 둘 것 | 역할 | 실행 classpath |
+|---|---|---|---|
+| `test_jdbc/lib` (브랜치별) | 배포 구성 표의 런타임 세트(launcher 포함) | 버전을 정하는 유일한 곳 | 포함 |
+| `CTP/jdbc/lib` | 기존 junit-4.8.2, Platform launcher·engine·commons 1.14.4, opentest4j 1.3.0, apiguardian 1.1.2 | 실행기 컴파일 전용 | 미포함 |
+
+- CTP의 junit-4.8.2는 그대로 둔다. 레거시 경로를 가장 오래된 브랜치(4.8.x)에 맞춰 컴파일하기 위해서다.
+- CTP의 Platform jar 버전은 "실행기가 지원하는 최소 API 버전"이라는 뜻이다. TC가 더 높은 버전을 써도 된다.
+
+TC 작성자의 로컬 확인 방법:
+
+| 방법 | 현재 상태 | 할 일 |
+|---|---|---|
+| IDE | `.classpath`가 lib과 어긋남(javassist 3.16.1을 가리키는데 lib에는 3.32.0) | lib 교체와 함께 갱신 |
+| Ant `test` 타깃 | 동작하지 않음. 첫 jvmarg가 en-dash(`–`)로 시작해 JVM이 메인 클래스 이름으로 해석한다(JDK 8·17 모두 "기본 클래스를 찾을 수 없음") | 옵션 수정과 JDK 9 이상 조건 처리 |
+| Ant로 JUnit 5 실행 | 기존 `<junit>`은 JUnit 3/4만 실행 | `<junitlauncher>`로 교체. Ant 1.10.6부터 JUnit jar를 프로젝트 classpath로 지정할 수 있다(로컬 Ant 1.10.15, `ant-junitlauncher.jar` 기본 포함) |
+| 콘솔 런처 | 없음 | 선택: `junit-platform-console-standalone` 1.14.4로 클래스·메서드 단위 실행 |
+| CTP 그대로 | 로컬 CTP Docker | 매일 도는 실행기와 같은 경로 |
+
+- 대부분의 TC는 DB 접속(`jdbc.properties`)이 필요하다. JUnit 위치와 무관하게 로컬 CUBRID가 있어야 한다.
 
 ## 다음 단계
 
@@ -330,8 +391,8 @@ flowchart TB
 | 단계 | 작업 | 산출물 | 완료 기준 |
 |---|---|---|---|
 | 0. 준비 | QA와 범위 합의(CTP 변경, auto 기본값, 롤백). 최신 develop으로 본 측정 도구를 다시 돌려 차이표 갱신. 현행 기준선 CTP 결과 확보 | 기준선 결과, 갱신한 차이표 | 차이 항목 전부 원인 분류됨 |
-| 1. 실행기 구현 | `cubrid-testtools`: 모드 선택, `PlatformJdbcCaseRunner`, 컴파일용 jar, `ant dist` | PR 1건 | jar 없는 시나리오에서 결과가 현행과 완전히 같음 |
-| 2. 시나리오 lib 상향 | `test_jdbc` develop: 배포 구성 표대로 jar 교체 | PR 1건 | CTP 컴파일 성공 |
+| 1. 실행기 구현 | PR 1(`cubrid-testtools`): 모드 선택, `PlatformJdbcCaseRunner`, 컴파일용 jar, `ant dist` | PR 1 | jar 없는 시나리오에서 결과가 현행과 완전히 같음 |
+| 2. 시나리오 lib 상향 | PR 2(`test_jdbc` develop): jar 교체, `build.xml`, `.classpath` | PR 2 | CTP 컴파일 성공 |
 | 3. 동등성 검증 | 같은 빌드·시나리오로 legacy와 platform을 각각 실행해 비교(로컬 CTP Docker, Java 8, `jdbc-ctp-verify-report`) | 비교 보고서 | 공통 실제 테스트의 OK/NOK 100% 일치, 차이는 차이표 범주에만 |
 | 4. 전환 | develop 일일 CTP에 적용, 1~2주 관찰 | 운영 결과 | 실패 수 안정, 회귀 없음 |
 | 5. 보고 강화 | 스택트레이스 기록, Assume과 동적 skip을 skip 유형으로 보고, 테스트별 타임아웃(`isTimeOut` 기록) | PR | QA 결과 화면에서 확인 |
@@ -354,6 +415,102 @@ flowchart TB
 - 실행기 교체가 늦어지는 동안 새로 쓰는 TC는 JUnit4로 써도 된다. 8단계에서 자동 변환된다.
 - 벤더 스위트를 손으로 3→4 변환하는 일만 피한다.
 
+### PR 구성
+두 PR은 저장소와 목적이 다르다. PR 1은 실행기가 어떤 JUnit 세트가 와도 돌 수 있게 만들고, PR 2는 test_jdbc develop이 실제로 새 JUnit 세트를 쓰게 만든다.
+
+#### PR 1: CTP 실행기 (`cubrid-testtools`, develop)
+목적: JDBC 실행기에 JUnit Platform 경로를 추가한다. 시나리오가 Platform jar를 제공하지 않으면 지금과 똑같이 동작한다.
+
+| 파일 | 변경 내용 |
+|---|---|
+| `CTP/shell/src/.../shell/main/JdbcLocalTest.java` | `start()`에서 모드를 판정하고, 선택된 실행기를 로그에 남긴다 |
+| 같은 파일 | 클래스 스캔과 결과 출력 코드를 두 경로가 함께 쓰도록 메서드로 뺀다. 레거시 등록·실행 로직은 바꾸지 않는다 |
+| `CTP/shell/src/.../shell/main/PlatformJdbcCaseRunner.java` (신규) | 발견, 집계용 suite 제외, 정적 skip 제외, 단건 실행, 결과 매핑. `org.junit.platform.*` 참조는 이 파일에만 |
+| `CTP/jdbc/lib/` | 컴파일용 jar 5개 추가: Platform launcher·engine·commons 1.14.4, opentest4j 1.3.0, apiguardian 1.1.2 |
+| `CTP/shell/lib/cubridqa-shell.jar` | `ant dist`로 다시 만들어 커밋 |
+| `CTP/conf/jdbc.conf` | `jdbc_runner` 설명과 기본값을 주석으로 추가 |
+| `doc/jdbc_guide.md` | "2.2 Completed configuration parameters"에 `jdbc_runner` 추가 |
+
+- 설정 키 상수는 shell 모듈 안에 둔다. 공용 `ConfigParameterConstants`에 넣으면 `cubridqa-common.jar`까지 다시 만들어야 한다.
+- `ant dist`는 모듈 jar 8개를 모두 다시 만든다.
+- 과거 커밋은 소스가 바뀌지 않은 모듈의 jar도 다시 만들어 함께 커밋했다(예: `421e66b`). 이번에는 내용이 바뀌는 `cubridqa-shell.jar`만 커밋하자고 QA에 제안한다.
+- `JdbcLocalTest`의 마지막 변경은 2016-11-08(`04b191a`)이다.
+
+모드별 동작:
+
+| `jdbc_runner` | 시나리오에 Platform jar | 동작 |
+|---|---|---|
+| `auto`(기본) | 없음 | 레거시 경로(현행과 동일) |
+| `auto` | 있음 | platform 경로 |
+| `legacy` | 관계없음 | 레거시 경로 |
+| `platform` | 없음 | 오류 메시지를 남기고 종료(설정 실수를 숨기지 않음) |
+
+검증:
+
+| 항목 | 방법 | 통과 기준 |
+|---|---|---|
+| 무해성 | 현재 develop TC(Platform jar 없음)를 새 CTP로 실행 | 등록 건수와 케이스별 OK/NOK가 기준선과 100% 같음 |
+| 강제 모드 | jar 없이 `jdbc_runner=platform` | 명확한 오류 메시지 |
+| platform 경로 | PR 2 브랜치로 실행 | PR 2의 검증 항목 |
+
+#### PR 2: test_jdbc 의존성 (`cubrid-testcases-private`, develop만)
+목적: test_jdbc develop이 쓸 JUnit을 4.8에서 Platform 세트로 올린다. 이 jar를 보고 PR 1의 auto 모드가 platform 경로로 전환된다.
+
+| 파일 | 변경 내용 |
+|---|---|
+| `lib/` 제거 | junit-4.8.1, junit-4.8.2, PowerMock 1.4.12 full jar 2개, 6월 검증 세트로 대체되는 mock 관련 jar |
+| `lib/` 추가 | JUnit 4.13.2, hamcrest-core 1.3, Platform launcher·engine·commons 1.14.4, Jupiter api·engine 5.14.4, Vintage 5.14.4, opentest4j 1.3.0, apiguardian 1.1.2, PowerMock 2.0.9 세트(6월 검증 조합) |
+| `build.xml` | `test` 타깃을 `<junitlauncher>`로 바꾼다(Vintage + Jupiter, 기존 포함 규칙과 힙 옵션 유지) |
+| 같은 파일 | `--add-opens`를 `=` 형식으로 고치고 JDK 9 이상에서만 넣는다 |
+| `.classpath` | 새 lib 목록으로 갱신 |
+| 테스트 소스 | 원칙적으로 바꾸지 않는다. PowerMock 2.0.9 상향에 소스 수정이 필요했는지는 6월 실험 기록으로 확인한다 |
+
+`build.xml` 조건 처리(같은 구성을 로컬 JDK 8·17에서 실행해 동작 확인):
+
+```xml
+<project name="jdbc_test" default="all" xmlns:if="ant:if">
+	<condition property="jdk9plus"><javaversion atleast="9"/></condition>
+	<!-- <junitlauncher> ... <fork> 안에서 -->
+	<jvmarg value="--add-opens=java.base/java.lang=ALL-UNNAMED" if:set="jdk9plus"/>
+</project>
+```
+
+- CommentOut_ 정리, 벤더 정리, 문법 이관은 이 PR에 넣지 않는다(7·8단계).
+- release 브랜치는 건드리지 않는다. Platform jar가 없으니 계속 레거시 경로로 돈다.
+
+검증:
+
+| 항목 | 방법 | 통과 기준 |
+|---|---|---|
+| 컴파일 | CTP 실행(run.sh의 javac)과 로컬 `ant compile` | 성공 |
+| 로컬 실행 | `<junitlauncher>`로 DB가 필요 없는 테스트 일부 실행 | 성공 |
+| 동등성 | 같은 빌드에서 "PR 1 CTP + 기존 TC(레거시)"와 "PR 1 CTP + PR 2(platform)"를 비교 | 공통 실제 테스트의 OK/NOK 100% 일치, 차이는 차이표 범주에만 |
+| PowerMock | PowerMock 8개 클래스 145건 | Vintage 경유로 모두 실행, 회귀 없음 |
+
+#### 병합 순서와 롤백
+
+```mermaid
+sequenceDiagram
+  participant P1 as PR 1 (CTP)
+  participant Q as QA의 CTP 환경
+  participant P2 as PR 2 (test_jdbc develop)
+  P1->>Q: 병합과 배포 (auto 기본값)
+  Note over Q: TC에 Platform jar가 없으므로 레거시 그대로
+  P2->>Q: 병합 (Platform jar 추가)
+  Note over Q: auto가 platform 경로로 전환
+  Q-->>P2: 문제가 생기면 PR 2만 되돌림
+  Note over Q: 레거시 경로로 복귀
+```
+
+- PR 2를 PR 1보다 먼저 병합하면 안 된다. 기존 CTP(레거시 실행기)에 JUnit 4.13.2가 들어가면 852건이 오류가 된다.
+- 롤백은 PR 2를 되돌리는 것 하나로 끝난다. PR 1은 남아 있어도 레거시 경로로 돈다.
+
+#### 같은 기회에 검토할 CTP 항목 (선택, 별도 PR 권장)
+- CTP의 TC 실행 명령(`run.sh:257`)에는 JVM 옵션이 없다.
+- test_jdbc `build.xml`은 주석상 TestAPIS825(CBRD-25713)용으로 `-Xms2g -Xmx4g`를 주지만, 이 옵션은 CTP 실행에 적용되지 않는다.
+- 최근 로컬 CTP 실행(2026-11-13)에서 TestAPIS825 6건이 모두 "Java heap space"로 실패했다.
+- jdbc.conf로 JVM 옵션을 받는 작은 CTP PR을 따로 제안한다. 이 옵션이 6건을 해결하는지(인과)는 아직 검증하지 않았다.
+
 ### 위험과 대응
 
 | 위험 | 영향 | 대응 |
@@ -372,9 +529,13 @@ flowchart TB
 - 공식 CTP 장비의 JDK 상한: JUnit 6 판단에만 영향이 있다.
 - Vintage 5.14.4로 직접 측정하지 않았다(6.0.3으로 대체).
 - 측정 스냅샷은 2026-07-14 develop이다. 최근 CTP 실행은 2,6xx건이므로 0단계에서 다시 측정한다.
+- QA가 어떤 CTP 브랜치로 어떤 TC 브랜치를 실행하는지: 두 저장소의 브랜치 구성만 확인했다.
+- PowerMock 2.0.9 상향에 테스트 소스 수정이 필요한지: 6월 실험 기록으로 확인해야 한다.
+- TestAPIS825의 힙 부족이 CTP 실행 명령에 JVM 옵션이 없기 때문인지(인과).
 
 ### 이슈화
-- "CTP JDBC 실행기의 JUnit Platform 전환"(1단계)과 "test_jdbc JUnit 의존성 상향"(2~4단계)을 분리해 등록한다. 등록 프로젝트는 QA와 합의한다.
+- PR 1("CTP JDBC 실행기의 JUnit Platform 전환")과 PR 2("test_jdbc JUnit 의존성 상향")를 별도 이슈로 등록한다. 등록 프로젝트는 QA와 합의한다.
+- CTP의 JVM 옵션 전달은 선택 항목으로 따로 검토한다.
 - 5단계 이후는 각각 별도 이슈로 진행한다.
 
 ## 참고
@@ -392,3 +553,10 @@ flowchart TB
 - pgjdbc: https://github.com/pgjdbc/pgjdbc (커밋 `9f396707` "chore: migrate build scripts to Gradle", 2019-11-29)
 - 선행 노트: `analysis/2026-07-14-jdbc-test-junit4-upgrade.md`, `analysis/2026-07-14-jdbc-ctp-harness-gradle.md`
 - 사내 보고서: "JUnit 4.13.2 적용을 위한 phantom 정리 검증"(2026-06-25), "CUBRID JDBC CommentOut_ 비활성 TC 분석"(2026-07-02)
+- JUnit 빌드 지원(launcher 선언 권고): https://docs.junit.org/6.0.3/running-tests/build-support.html
+- Ant `junitlauncher`: https://ant.apache.org/manual/Tasks/junitlauncher.html
+- SUREFIRE-1585(launcher 버전을 프로젝트 classpath에 맞춤): https://issues.apache.org/jira/browse/SUREFIRE-1585
+- 콘솔 런처 버전 목록: https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/maven-metadata.xml
+- MySQL C/J `build.xml`: 외부 lib 디렉터리 191행, `<junitlauncher>` 1334행
+- test_jdbc 로컬 빌드: `interface/JDBC/test_jdbc/build.xml`, `interface/JDBC/test_jdbc/.classpath`
+- CTP 문서·이력: `doc/jdbc_guide.md`, 커밋 `421e66b`(jar 재생성 커밋 관행), `04b191a`(`JdbcLocalTest` 마지막 변경)
